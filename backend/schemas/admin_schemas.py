@@ -59,6 +59,7 @@ class AdminStrategyCreateRequest(BaseModel):
     default_parameters: Optional[str] = "{}" # JSON string
     category: Optional[str] = Field(None, max_length=50)
     risk_level: Optional[str] = Field(None, max_length=20) # e.g., Low, Medium, High
+    payment_options_json: Optional[str] = Field(None, description="JSON string for payment options, e.g., '[{\"months\": 1, \"price_usd\": 10.00}]'")
 
 class AdminStrategyUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=3, max_length=100)
@@ -68,6 +69,7 @@ class AdminStrategyUpdateRequest(BaseModel):
     category: Optional[str] = Field(None, max_length=50)
     risk_level: Optional[str] = Field(None, max_length=20)
     is_active: Optional[bool] = None
+    payment_options_json: Optional[str] = Field(None, description="JSON string for payment options, e.g., '[{\"months\": 1, \"price_usd\": 25.00}]'")
 
 
 # --- Admin Site Settings Schemas ---

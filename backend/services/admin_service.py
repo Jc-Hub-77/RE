@@ -146,7 +146,8 @@ def list_all_strategies_admin(db_session: Session):
 
 
 def add_new_strategy_admin(db_session: Session, name: str, description: str, python_code_path: str, 
-                           default_parameters: str, category: str, risk_level: str):
+                           default_parameters: str, category: str, risk_level: str,
+                           payment_options_json: Optional[str] = None):
     existing_strategy = db_session.query(Strategy).filter(Strategy.name == name).first()
     if existing_strategy:
         return {"status": "error", "message": f"Strategy with name '{name}' already exists."}
@@ -204,6 +205,13 @@ def add_new_strategy_admin(db_session: Session, name: str, description: str, pyt
         logger.warning(f"Admin: Attempted to add strategy with invalid JSON parameters: {default_parameters}")
         return {"status": "error", "message": "Default parameters must be valid JSON."}
 
+    if payment_options_json:
+        try:
+            json.loads(payment_options_json)
+        except json.JSONDecodeError:
+            logger.warning(f"Admin: Attempted to add strategy with invalid JSON for payment options: {payment_options_json}")
+            return {"status": "error", "message": "Invalid JSON format for payment options."}
+
     new_strategy = Strategy(
         name=name, 
         description=description, 
@@ -211,7 +219,8 @@ def add_new_strategy_admin(db_session: Session, name: str, description: str, pyt
         default_parameters=default_parameters,
         category=category,
         risk_level=risk_level,
-        is_active=True 
+        is_active=True,
+        payment_options_json=payment_options_json
     )
     try:
         db_session.add(new_strategy)
@@ -229,7 +238,7 @@ def update_strategy_admin(db_session: Session, strategy_id: int, updates: dict):
     if not strategy:
         return {"status": "error", "message": "Strategy not found."}
 
-    allowed_fields = ["name", "description", "python_code_path", "default_parameters", "category", "risk_level", "is_active"]
+    allowed_fields = ["name", "description", "python_code_path", "default_parameters", "category", "risk_level", "is_active", "payment_options_json"]
     updated_count = 0
     for key, value in updates.items():
         if key in allowed_fields:
@@ -278,6 +287,21 @@ def update_strategy_admin(db_session: Session, strategy_id: int, updates: dict):
                 except Exception as e:
                     logger.error(f"Admin: Error validating updated strategy file {value}: {e}", exc_info=True)
                     return {"status": "error", "message": f"Error validating updated strategy file: {str(e)}"}
+
+            if key == "payment_options_json" and value is not None:
+                if value: # Ensure it's not an empty string if that's not allowed, or handle as needed
+                    try:
+                        json.loads(value)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Admin: Attempted to update strategy {strategy_id} with invalid JSON for payment options: {value}")
+                        return {"status": "error", "message": "Invalid JSON format for payment options."}
+                # If value is None or empty string and that's acceptable for clearing the field,
+                # it will be set by setattr. If empty string "" should be invalid JSON,
+                # the json.loads(value) will raise an error.
+                # If you want to allow null but not empty string for actual JSON, add specific check:
+                # elif key == "payment_options_json" and value == "":
+                #    return {"status": "error", "message": "Payment options JSON cannot be an empty string. Send null to clear."}
+
 
             setattr(strategy, key, value)
             updated_count +=1

@@ -19,6 +19,11 @@ class StrategyAvailableListResponse(BaseModel):
     status: str
     strategies: List[StrategyAvailableView]
 
+class PaymentOption(BaseModel):
+    months: int
+    price_usd: float
+    description: Optional[str] = None
+
 class StrategyParameterDefinition(BaseModel): # Describes a single parameter
     # This structure depends on how strategy classes define their params.
     # Example:
@@ -33,6 +38,7 @@ class StrategyParameterDefinition(BaseModel): # Describes a single parameter
 class StrategyDetailView(StrategyAvailableView):
     parameters_definition: Dict[str, StrategyParameterDefinition] = {} # Defines structure and types of params
     default_parameters_db: Dict[str, Any] = {} # Actual default values from DB (JSON parsed)
+    payment_options: Optional[List[PaymentOption]] = None
 
 class StrategyDetailResponse(BaseModel):
     status: str

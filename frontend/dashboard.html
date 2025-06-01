@@ -119,6 +119,52 @@
                     </div>
                     {/* <a href="referral_details.html" class="btn btn-outline mt-2">View Referral Details</a> */}
                 </div>
+
+                <!-- Profile Update Modal -->
+                <div id="updateProfileModal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h2>Update Profile</h2>
+                            <button type="button" class="close-btn" id="closeUpdateProfileModalBtn">&times;</button>
+                        </div>
+                        <form id="updateProfileForm">
+                            <div class="form-group">
+                                <label for="profileFullName">Full Name:</label>
+                                <input type="text" id="profileFullName" name="full_name" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label for="profileBio">Bio:</label>
+                                <textarea id="profileBio" name="bio" rows="3" class="form-control"></textarea>
+                            </div>
+                            <button type="submit" class="btn">Save Changes</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Change Password Modal -->
+                <div id="changePasswordModal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h2>Change Password</h2>
+                            <button type="button" class="close-btn" id="closeChangePasswordModalBtn">&times;</button>
+                        </div>
+                        <form id="changePasswordForm">
+                            <div class="form-group">
+                                <label for="oldPassword">Old Password:</label>
+                                <input type="password" id="oldPassword" name="old_password" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="newPassword">New Password:</label>
+                                <input type="password" id="newPassword" name="new_password" class="form-control" required minlength="8">
+                            </div>
+                            <div class="form-group">
+                                <label for="confirmNewPassword">Confirm New Password:</label>
+                                <input type="password" id="confirmNewPassword" name="confirm_new_password" class="form-control" required minlength="8">
+                            </div>
+                            <button type="submit" class="btn">Update Password</button>
+                        </form>
+                    </div>
+                </div>
             </section>
         </div>
     </div>

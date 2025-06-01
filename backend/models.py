@@ -97,6 +97,7 @@ class Strategy(Base):
     is_active = Column(Boolean, default=True) # Admin can deactivate a strategy
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    payment_options_json = Column(Text, nullable=True) # JSON string for payment options
 
     subscriptions = relationship("UserStrategySubscription", back_populates="strategy")
 
