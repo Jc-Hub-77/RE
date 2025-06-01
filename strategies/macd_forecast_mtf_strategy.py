@@ -1,315 +1,494 @@
-# trading_platform/strategies/macd_forecast_mtf_strategy.py
-import datetime
 import logging
-import pandas as pd
-import ta 
-import numpy as np 
-import json
-import time
-from sqlalchemy.orm import Session
-from backend.models import Position, Order, UserStrategySubscription # Added UserStrategySubscription
+import numpy as np
+import talib
+import pandas
+import ccxt # Though self.exchange_ccxt is provided
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+import json # For serializing/deserializing forecast memory and state
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
-
-def percentile_linear_interpolation(data_array, percentile):
-    if not data_array: return 0.0 
-    # Ensure data_array contains numbers, convert if necessary, handle potential errors
-    numeric_array = []
-    for x in data_array:
-        try:
-            numeric_array.append(float(x))
-        except (ValueError, TypeError):
-            # logger.warning(f"Could not convert {x} to float for percentile calculation. Skipping.")
-            pass # Skip non-numeric values
-    if not numeric_array: return 0.0
-    
-    # Older numpy versions might not have 'method' parameter.
-    # 'linear' is equivalent to older 'fraction' parameter behavior if needed.
-    try:
-        return np.percentile(np.array(numeric_array), percentile, method='linear')
-    except TypeError: # Fallback for older numpy
-        return np.percentile(np.array(numeric_array), percentile)
-
+# Ensure high precision for Decimal calculations
+getcontext().prec = 18
 
 class MACDForecastMTFStrategy:
-    def __init__(self, symbol: str, timeframe: str, capital: float = 1000,
-                 htf: str = "240", # Higher timeframe for trend
-                 fast_len: int = 12, slow_len: int = 26, signal_len: int = 9,
-                 trend_determination: str = 'MACD - Signal', 
-                 lot_size: float = 1.0, 
-                 use_stop_loss: bool = True, stop_loss_percent: float = 2.0,
-                 use_take_profit: bool = True, take_profit_percent: float = 4.0,
-                 max_memory: int = 50, forecast_length: int = 100, 
-                 forecast_top_percentile: int = 80, forecast_mid_percentile: int = 50,
-                 forecast_bottom_percentile: int = 20, **custom_parameters):
-        self.name = "MTF MACD Strategy with Forecasting"
-        self.symbol = symbol
-        self.timeframe = timeframe 
-        
-        self.htf = htf # Ensure this is a valid timeframe string CCXT understands, e.g., '4h' if '240' means minutes
-        self.fast_len = int(fast_len)
-        self.slow_len = int(slow_len)
-        self.signal_len = int(signal_len)
-        self.trend_determination = trend_determination
-        
-        self.lot_size = float(lot_size) # Position size in base currency (e.g., BTC amount)
-        self.use_stop_loss = bool(use_stop_loss)
-        self.stop_loss_decimal = float(stop_loss_percent) / 100.0
-        self.use_take_profit = bool(use_take_profit)
-        self.take_profit_decimal = float(take_profit_percent) / 100.0
 
-        self.max_memory = int(max_memory)
-        self.forecast_length = int(forecast_length)
-        self.forecast_top_percentile = int(forecast_top_percentile)
-        self.forecast_mid_percentile = int(forecast_mid_percentile)
-        self.forecast_bottom_percentile = int(forecast_bottom_percentile)
-        
-        self.price_precision = 8 
-        self.quantity_precision = 8
-        self._precisions_fetched_ = False
-
-        # In-memory state for forecast vectors (not persisted across restarts for now)
-        # TODO: For robust forecasting state, persist forecast_memory_up/down and counters in DB (e.g., UserStrategySubscription.custom_data)
-        self.forecast_state = {
-            "up_idx_counter": 0, "dn_idx_counter": 0,
-            "uptrend_init_price": None, "downtrend_init_price": None,
-            "forecast_memory_up": {}, "forecast_memory_down": {}
-        }
-        
-        init_params_log = {
-            "symbol": symbol, "timeframe": timeframe, "htf": htf, "fast_len": fast_len, "slow_len": slow_len,
-            "signal_len": signal_len, "trend_determination": trend_determination, "lot_size": lot_size,
-            "use_stop_loss": use_stop_loss, "stop_loss_percent": stop_loss_percent,
-            "use_take_profit": use_take_profit, "take_profit_percent": take_profit_percent,
-            "max_memory": max_memory, "forecast_length": forecast_length, 
-            "forecast_percentiles": (forecast_bottom_percentile, forecast_mid_percentile, forecast_top_percentile),
-            "custom_parameters": custom_parameters
-        }
-        logger.info(f"[{self.name}-{self.symbol}] Initialized with params: {init_params_log}")
-
-    @classmethod
-    def get_parameters_definition(cls):
+    @staticmethod
+    def get_parameters_definition():
         return {
-            "htf": {"type": "timeframe", "default": "4h", "label": "Higher Timeframe (Trend)"}, # Changed default to '4h'
-            "fast_len": {"type": "int", "default": 12, "min": 2, "label": "MACD Fast Length"},
-            "slow_len": {"type": "int", "default": 26, "min": 2, "label": "MACD Slow Length"},
-            "signal_len": {"type": "int", "default": 9, "min": 2, "label": "MACD Signal Length"},
-            "trend_determination": {"type": "select", "default": "MACD - Signal", "options": ["MACD", "MACD - Signal"], "label": "Trend Determination (HTF)"},
-            "lot_size": {"type": "float", "default": 0.01, "min": 0.000001, "label": "Position Size (Base Asset Qty)"}, # Clarified label
-            "use_stop_loss": {"type": "bool", "default": True, "label": "Use Stop Loss"},
-            "stop_loss_percent": {"type": "float", "default": 2.0, "min": 0.1, "step": 0.1, "label": "Stop Loss %"},
-            "use_take_profit": {"type": "bool", "default": True, "label": "Use Take Profit"},
-            "take_profit_percent": {"type": "float", "default": 4.0, "min": 0.1, "step": 0.1, "label": "Take Profit %"},
-            "max_memory": {"type": "int", "default": 50, "min": 2, "label": "Forecast Max Memory (bars)"},
-            "forecast_length": {"type": "int", "default": 100, "min": 1, "label": "Forecast Projection Length (bars)"},
-            "forecast_top_percentile": {"type": "int", "default": 80, "min": 51, "max": 99, "label": "Forecast Top Percentile"},
-            "forecast_mid_percentile": {"type": "int", "default": 50, "min": 1, "max": 99, "label": "Forecast Mid Percentile"},
-            "forecast_bottom_percentile": {"type": "int", "default": 20, "min": 1, "max": 49, "label": "Forecast Bottom Percentile"}
+            "trading_pair": {"type": "str", "label": "Trading Pair", "default": "BTC/USDT"},
+            "htf_interval": {"type": "str", "label": "Higher Timeframe (Trend)", "default": "4h", "choices": ["1h", "2h", "4h", "6h", "12h", "1d"]},
+            "chart_interval": {"type": "str", "label": "Chart Kline Interval", "default": "15m", "choices": ["1m", "3m", "5m", "15m", "30m", "1h"]},
+            "macd_fast_len": {"type": "int", "label": "MACD Fast Length", "default": 12, "min": 2},
+            "macd_slow_len": {"type": "int", "label": "MACD Slow Length", "default": 26, "min": 2},
+            "macd_signal_len": {"type": "int", "label": "MACD Signal Length", "default": 9, "min": 2},
+            "macd_trend_determination": {"type": "str", "label": "MACD Trend Determination", "default": "MACD vs Signal", "choices": ["MACD vs Zero", "MACD vs Signal"]},
+            "order_quantity_usd": {"type": "float", "label": "Order Quantity (USD Notional)", "default": 100.0, "min": 1.0},
+            "leverage": {"type": "int", "label": "Leverage", "default": 10, "min": 1, "max": 100},
+            "use_stop_loss": {"type": "bool", "label": "Use Stop Loss", "default": True},
+            "stop_loss_pct": {"type": "float", "label": "Stop Loss % (from entry)", "default": 2.0, "min": 0.1, "step": 0.1},
+            "use_take_profit": {"type": "bool", "label": "Use Take Profit", "default": True},
+            "take_profit_pct": {"type": "float", "label": "Take Profit % (from entry)", "default": 4.0, "min": 0.1, "step": 0.1},
+            "forecast_max_memory": {"type": "int", "label": "Forecast Max Memory (per bar index)", "default": 50, "min": 2},
+            "forecast_length_bars": {"type": "int", "label": "Forecast Projection Length (bars)", "default": 100, "min": 1},
+            "forecast_upper_percentile": {"type": "int", "label": "Forecast Upper Percentile", "default": 80, "min": 51, "max": 99},
+            "forecast_mid_percentile": {"type": "int", "label": "Forecast Mid Percentile", "default": 50, "min": 1, "max": 99},
+            "forecast_lower_percentile": {"type": "int", "label": "Forecast Lower Percentile", "default": 20, "min": 1, "max": 49},
         }
 
-    def _get_precisions_live(self, exchange_ccxt):
-        if not self._precisions_fetched_:
-            try:
-                exchange_ccxt.load_markets(True)
-                market = exchange_ccxt.market(self.symbol)
-                self.price_precision = market['precision']['price']
-                self.quantity_precision = market['precision']['amount']
-                self._precisions_fetched_ = True
-                logger.info(f"[{self.name}-{self.symbol}] Precisions: Price={self.price_precision}, Qty={self.quantity_precision}")
-            except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching live precisions: {e}", exc_info=True)
+    def __init__(self, db_session, user_sub_obj, strategy_params: dict, exchange_ccxt, logger=None):
+        self.db_session = db_session
+        self.user_sub_obj = user_sub_obj
+        self.params = strategy_params
+        self.exchange_ccxt = exchange_ccxt
+        self.logger = logger if logger else logging.getLogger(__name__)
+        self.name = "MACDForecastMTFStrategy"
 
-    def _format_price(self, price, exchange_ccxt): self._get_precisions_live(exchange_ccxt); return float(exchange_ccxt.price_to_precision(self.symbol, price))
-    def _format_quantity(self, quantity, exchange_ccxt): self._get_precisions_live(exchange_ccxt); return float(exchange_ccxt.amount_to_precision(self.symbol, quantity))
-    
-    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str, timeout_seconds: int = 60, check_interval_seconds: int = 3):
-        start_time = time.time()
-        logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {timeout_seconds}s)")
-        while time.time() - start_time < timeout_seconds:
-            try:
-                order = exchange_ccxt.fetch_order(order_id, symbol)
-                logger.debug(f"[{self.name}-{self.symbol}] Order {order_id} status: {order['status']}")
-                if order['status'] == 'closed': logger.info(f"[{self.name}-{self.symbol}] Order {order_id} filled. AvgPrice: {order.get('average')}, FilledQty: {order.get('filled')}"); return order
-                if order['status'] in ['canceled', 'rejected', 'expired']: logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} is {order['status']}."); return order
-            except ccxt.OrderNotFound: logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} not found. Retrying.")
-            except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching order {order_id}: {e}. Retrying.", exc_info=True)
-            time.sleep(check_interval_seconds)
-        logger.warning(f"[{self.name}-{self.symbol}] Timeout for order {order_id}. Final check.")
-        try: final_status = exchange_ccxt.fetch_order(order_id, symbol); logger.info(f"[{self.name}-{self.symbol}] Final status for order {order_id}: {final_status['status']}"); return final_status
-        except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Final check for order {order_id} failed: {e}", exc_info=True); return None
+        self.trading_pair = self.params.get("trading_pair", "BTC/USDT")
+        self.htf_interval = self.params.get("htf_interval", "4h")
+        self.chart_interval = self.params.get("chart_interval", "15m")
+        self.macd_fast_len = int(self.params.get("macd_fast_len", 12))
+        self.macd_slow_len = int(self.params.get("macd_slow_len", 26))
+        self.macd_signal_len = int(self.params.get("macd_signal_len", 9))
+        self.macd_trend_determination = self.params.get("macd_trend_determination", "MACD vs Signal")
+        
+        self.order_quantity_usd = Decimal(str(self.params.get("order_quantity_usd", "100.0")))
+        self.leverage = int(self.params.get("leverage", 10))
+        self.use_stop_loss = self.params.get("use_stop_loss", True)
+        self.stop_loss_pct = Decimal(str(self.params.get("stop_loss_pct", "2.0"))) / Decimal("100")
+        self.use_take_profit = self.params.get("use_take_profit", True)
+        self.take_profit_pct = Decimal(str(self.params.get("take_profit_pct", "4.0"))) / Decimal("100")
 
-    def _create_db_order(self, db_session: Session, subscription_id: int, position_id: int = None, **kwargs):
-        db_order = Order(subscription_id=subscription_id, **kwargs); db_session.add(db_order); db_session.commit(); return db_order
+        self.forecast_max_memory = int(self.params.get("forecast_max_memory", 50))
+        self.forecast_length_bars = int(self.params.get("forecast_length_bars", 100))
+        self.forecast_upper_percentile = int(self.params.get("forecast_upper_percentile", 80))
+        self.forecast_mid_percentile = int(self.params.get("forecast_mid_percentile", 50))
+        self.forecast_lower_percentile = int(self.params.get("forecast_lower_percentile", 20))
 
-    def _calculate_macd(self, series_df, fast, slow, signal):
-        if 'close' not in series_df.columns: logger.error(f"[{self.name}-{self.symbol}] 'close' column missing for MACD."); return pd.DataFrame()
-        macd_ta = ta.trend.MACD(series_df['close'], window_fast=fast, window_slow=slow, window_sign=signal)
-        return pd.DataFrame({ 'macd': macd_ta.macd(), 'histogram': macd_ta.macd_diff(), 'signal': macd_ta.macd_signal() })
+        # State variables for forecasting
+        self.forecast_memory = {1: [], 0: []}  # Keys: 1 for uptrend data, 0 for downtrend data
+                                              # Values: List of lists. memory[type][idx_in_trend] = [price_deviations]
+        self.current_uptrend_idx = 0
+        self.current_downtrend_idx = 0
+        self.current_uptrend_init_price = Decimal("0")
+        self.current_downtrend_init_price = Decimal("0")
+        self.is_prev_chart_uptrend = None # Stores the chart trend from the previous tick
 
-    # --- Forecasting Methods ---
-    def _populate_forecast_memory(self, is_uptrend_primary, current_close_price):
-        fs = self.forecast_state # Use alias for brevity
-        if is_uptrend_primary:
-            if fs['uptrend_init_price'] is None: logger.warning(f"[{self.name}-{self.symbol}] Uptrend init price not set for forecast memory."); return
-            price_delta = current_close_price - fs['uptrend_init_price']
-            if fs['up_idx_counter'] not in fs['forecast_memory_up']: fs['forecast_memory_up'][fs['up_idx_counter']] = []
-            fs['forecast_memory_up'][fs['up_idx_counter']].insert(0, price_delta)
-            if len(fs['forecast_memory_up'][fs['up_idx_counter']]) > self.max_memory: fs['forecast_memory_up'][fs['up_idx_counter']].pop()
-        else: # Downtrend
-            if fs['downtrend_init_price'] is None: logger.warning(f"[{self.name}-{self.symbol}] Downtrend init price not set for forecast memory."); return
-            price_delta = current_close_price - fs['downtrend_init_price']
-            if fs['dn_idx_counter'] not in fs['forecast_memory_down']: fs['forecast_memory_down'][fs['dn_idx_counter']] = []
-            fs['forecast_memory_down'][fs['dn_idx_counter']].insert(0, price_delta)
-            if len(fs['forecast_memory_down'][fs['dn_idx_counter']]) > self.max_memory: fs['forecast_memory_down'][fs['dn_idx_counter']].pop()
-    
-    def _generate_forecast_bands(self, is_uptrend_primary, current_close_price, current_bar_idx_for_time):
-        # This is a placeholder for the complex PineScript forecasting logic.
-        # A full translation requires managing historical trend "vectors" and their lengths.
-        logger.debug(f"[{self.name}-{self.symbol}] Conceptual forecast generation. IsUptrend: {is_uptrend_primary}")
-        forecast_bands = {"upper": [], "mid": [], "lower": []}
-        init_price = self.forecast_state['uptrend_init_price'] if is_uptrend_primary else self.forecast_state['downtrend_init_price']
-        if init_price is None: init_price = current_close_price # Fallback
+        # Active position state
+        self.active_position_side = None  # 'long', 'short', or None
+        self.position_entry_price = None
+        self.position_qty = Decimal("0")
+        self.active_sl_tp_orders = {} # {'sl_id': id, 'tp_id': id}
 
-        for x in range(self.forecast_length):
-            offset = (x / self.forecast_length) * 0.01 * init_price 
-            forecast_bands["upper"].append({"time": current_bar_idx_for_time + x, "value": init_price + offset * 2}) # Conceptual
-            forecast_bands["mid"].append({"time": current_bar_idx_for_time + x, "value": init_price + offset})     # Conceptual
-            forecast_bands["lower"].append({"time": current_bar_idx_for_time + x, "value": init_price - offset * 0.5}) # Conceptual
+        self._load_persistent_state() # Attempt to load forecast_memory and other states
+
+        self._fetch_market_precision()
+        self._set_leverage()
+        self.logger.info(f"{self.name} initialized for {self.trading_pair}, UserSubID {self.user_sub_obj.id}")
+
+    def _load_persistent_state(self):
+        self.logger.info("DB_TODO: Load persistent state (forecast_memory, trend indices, init prices, active position) from database.")
+        # Example:
+        # state_json = self.db_session.query(UserStrategySubscription.strategy_state_json)        #                        .filter(UserStrategySubscription.id == self.user_sub_obj.id).scalar()
+        # if state_json:
+        #     try:
+        #         state = json.loads(state_json)
+        #         self.forecast_memory = {int(k): v for k, v in state.get("forecast_memory", {1:[], 0:[]}).items()} # Ensure keys are int
+        #         self.current_uptrend_idx = state.get("current_uptrend_idx", 0)
+        #         # ... load other state vars ...
+        #         # Convert Decimal strings back to Decimal
+        #         self.current_uptrend_init_price = Decimal(state.get("current_uptrend_init_price", "0"))
+        #         self.current_downtrend_init_price = Decimal(state.get("current_downtrend_init_price", "0"))
+        #         self.active_position_side = state.get("active_position_side")
+        #         self.position_entry_price = Decimal(state.get("position_entry_price", "0")) if self.active_position_side else None
+        #         self.position_qty = Decimal(state.get("position_qty", "0")) if self.active_position_side else Decimal("0")
+        #         self.active_sl_tp_orders = state.get("active_sl_tp_orders", {})
+        #         self.is_prev_chart_uptrend = state.get("is_prev_chart_uptrend")
+        #         self.logger.info("Successfully loaded persistent state.")
+        #     except Exception as e:
+        #         self.logger.error(f"Error loading/parsing persistent state: {e}. Starting with fresh state.")
+        # else:
+        #     self.logger.info("No persistent state found. Starting with fresh state.")
+        pass
+
+
+    def _save_persistent_state(self):
+        self.logger.info("DB_TODO: Save persistent state (forecast_memory, trend indices, init prices, active position) to database.")
+        # Example:
+        # state = {
+        #     "forecast_memory": self.forecast_memory,
+        #     "current_uptrend_idx": self.current_uptrend_idx,
+        #     "current_downtrend_idx": self.current_downtrend_idx,
+        #     "current_uptrend_init_price": str(self.current_uptrend_init_price), # Convert Decimals to str
+        #     "current_downtrend_init_price": str(self.current_downtrend_init_price),
+        #     "active_position_side": self.active_position_side,
+        #     "position_entry_price": str(self.position_entry_price) if self.position_entry_price else None,
+        #     "position_qty": str(self.position_qty) if self.position_qty else "0",
+        #     "active_sl_tp_orders": self.active_sl_tp_orders,
+        #     "is_prev_chart_uptrend": self.is_prev_chart_uptrend
+        # }
+        # try:
+        #     state_json = json.dumps(state)
+        #     # self.db_session.query(UserStrategySubscription).filter(UserStrategySubscription.id == self.user_sub_obj.id)        #     #               .update({"strategy_state_json": state_json})
+        #     # self.db_session.commit()
+        #     self.logger.info("Successfully saved persistent state.")
+        # except Exception as e:
+        #     self.logger.error(f"Error saving persistent state: {e}")
+        #     # self.db_session.rollback() # If using db_session directly
+        pass
+
+    def _fetch_market_precision(self):
+        try:
+            self.exchange_ccxt.load_markets()
+            market = self.exchange_ccxt.markets[self.trading_pair]
+            self.quantity_precision_str = str(market['precision']['amount'])
+            self.price_precision_str = str(market['precision']['price'])
+            self.logger.info(f"Precision for {self.trading_pair}: Qty Prec Str={self.quantity_precision_str}, Price Prec Str={self.price_precision_str}")
+        except Exception as e:
+            self.logger.error(f"Error fetching precision for {self.trading_pair}: {e}. Using defaults.")
+            self.quantity_precision_str = "0.00001"
+            self.price_precision_str = "0.01"
+
+    def _get_decimal_places(self, precision_str):
+        if precision_str is None: return 8 # Default if None
+        try:
+            # Convert scientific notation like "1e-5" to "0.00001"
+            if 'e-' in precision_str.lower():
+                num_val = float(precision_str)
+                precision_str = format(num_val, f'.{abs(int(precision_str.split("e-")[1]))}f')
+
+            d_prec = Decimal(precision_str)
+            if d_prec.as_tuple().exponent < 0:
+                return abs(d_prec.as_tuple().exponent)
+            return 0 # If precision is integer like 1, 10
+        except Exception as e:
+            self.logger.warning(f"Could not parse precision string '{precision_str}'. Error: {e}. Using default 8.")
+            return 8
+
+
+    def _format_quantity(self, quantity: Decimal):
+        places = self._get_decimal_places(self.quantity_precision_str)
+        return str(quantity.quantize(Decimal('1e-' + str(places)), rounding=ROUND_DOWN))
+
+    def _format_price(self, price: Decimal):
+        places = self._get_decimal_places(self.price_precision_str)
+        return str(price.quantize(Decimal('1e-' + str(places)), rounding=ROUND_NEAREST))
+
+    def _set_leverage(self):
+        try:
+            if hasattr(self.exchange_ccxt, 'set_leverage'):
+                symbol_for_leverage = self.trading_pair.split(':')[0] if ':' in self.trading_pair else self.trading_pair
+                self.exchange_ccxt.set_leverage(self.leverage, symbol_for_leverage)
+                self.logger.info(f"Leverage set to {self.leverage}x for {symbol_for_leverage}")
+        except Exception as e:
+            self.logger.warning(f"Could not set leverage for {self.trading_pair}: {e}")
+
+
+    def _get_ohlcv_data(self, interval, limit, is_backtest, historical_data_feed=None, end_time_utc=None):
+        if is_backtest and historical_data_feed:
+            return historical_data_feed.get_ohlcv(self.trading_pair, interval, limit=limit, end_time_utc=end_time_utc)
+        else:
+            return self.exchange_ccxt.fetch_ohlcv(self.trading_pair, interval, limit=limit)
+
+
+    def _calculate_macd_values(self, ohlcv_df):
+        if ohlcv_df is None or ohlcv_df.empty or len(ohlcv_df) < self.macd_slow_len:
+            return None, None, None
+        close_prices = ohlcv_df['close'].to_numpy(dtype=float)
+        macd, signal, hist = talib.MACD(close_prices,
+                                        fastperiod=self.macd_fast_len,
+                                        slowperiod=self.macd_slow_len,
+                                        signalperiod=self.macd_signal_len)
+        return macd, signal, hist
+
+    def _determine_trend(self, macd_value, signal_value):
+        if self.macd_trend_determination == "MACD vs Zero":
+            is_bullish = macd_value > 0
+            is_bearish = macd_value < 0
+        else: # MACD vs Signal
+            is_bullish = macd_value > signal_value
+            is_bearish = macd_value < signal_value
+        return is_bullish, is_bearish
+
+    def _populate_memory(self, current_trend_type, current_trend_bar_idx, current_trend_init_price, current_close_price):
+        price_deviation = float(current_close_price - current_trend_init_price)
+
+        if current_trend_type not in self.forecast_memory:
+            self.forecast_memory[current_trend_type] = []
+
+        while len(self.forecast_memory[current_trend_type]) <= current_trend_bar_idx:
+            self.forecast_memory[current_trend_type].append([])
+        
+        self.forecast_memory[current_trend_type][current_trend_bar_idx].insert(0, price_deviation)
+
+        if len(self.forecast_memory[current_trend_type][current_trend_bar_idx]) > self.forecast_max_memory:
+            self.forecast_memory[current_trend_type][current_trend_bar_idx].pop()
+
+
+    def _calculate_forecast_bands(self, trend_about_to_start_type, new_trend_init_price):
+        forecast_bands = []
+        
+        if trend_about_to_start_type not in self.forecast_memory or not self.forecast_memory[trend_about_to_start_type]:
+            self.logger.info(f"No historical data in forecast_memory for trend type {trend_about_to_start_type} to make forecast.")
+            return forecast_bands
+
+        historical_segments = self.forecast_memory[trend_about_to_start_type]
+        max_historical_trend_len = len(historical_segments)
+
+        for bar_offset in range(self.forecast_length_bars):
+            if bar_offset < max_historical_trend_len:
+                deviations_for_this_bar_idx = historical_segments[bar_offset]
+                if len(deviations_for_this_bar_idx) > 1:
+                    lower_dev = np.percentile(deviations_for_this_bar_idx, self.forecast_lower_percentile)
+                    mid_dev = np.percentile(deviations_for_this_bar_idx, self.forecast_mid_percentile)
+                    upper_dev = np.percentile(deviations_for_this_bar_idx, self.forecast_upper_percentile)
+
+                    forecast_bands.append({
+                        'bar_offset': bar_offset,
+                        'lower': float(new_trend_init_price + Decimal(str(lower_dev))),
+                        'mid': float(new_trend_init_price + Decimal(str(mid_dev))),
+                        'upper': float(new_trend_init_price + Decimal(str(upper_dev)))
+                    })
+
+        if forecast_bands: self.logger.info(f"Calculated {len(forecast_bands)} forecast points. First point: {forecast_bands[0] if forecast_bands else 'N/A'}")
         return forecast_bands
 
-    def run_backtest(self, historical_df: pd.DataFrame, htf_historical_df: pd.DataFrame = None):
-        # (Backtesting logic remains simplified as per original, focusing on live execution for this task)
-        logger.info(f"Running backtest for {self.name} on {self.symbol}...")
-        return {"pnl": 0, "trades": [], "message": "Backtesting for this strategy is conceptual and not fully implemented for detailed PnL."}
 
-    def execute_live_signal(self, db_session: Session, subscription_id: int, market_data_df: pd.DataFrame, exchange_ccxt, user_sub_obj: UserStrategySubscription):
-        logger.debug(f"[{self.name}-{self.symbol}] Executing live signal for sub {subscription_id}...")
-        if market_data_df.empty: logger.warning(f"[{self.name}-{self.symbol}] Market data is empty."); return
-        self._get_precisions_live(exchange_ccxt)
+    def _get_current_position_details(self, symbol, historical_data_feed=None, is_backtest=False):
+        if self.active_position_side:
+            return {'side': self.active_position_side, 'qty': self.position_qty, 'entry_price': self.position_entry_price}
         
-        # Load persistent forecast state if available (e.g., from user_sub_obj.custom_data)
-        # For now, forecast_state is in-memory and resets on strategy re-init.
-        # sub_custom_data = json.loads(user_sub_obj.custom_parameters) if isinstance(user_sub_obj.custom_parameters, str) else user_sub_obj.custom_parameters
-        # self.forecast_state = sub_custom_data.get("forecast_state", self.forecast_state) # Example load
+        if is_backtest and historical_data_feed:
+             return historical_data_feed.get_current_position(symbol)
 
-        # Calculate Indicators
-        primary_macd_df = self._calculate_macd(market_data_df, self.fast_len, self.slow_len, self.signal_len)
-        df = market_data_df.join(primary_macd_df)
+        if not is_backtest:
+             self.logger.info("DB_TODO: Query DB for position details if self.active_position_side is None")
+             # Example live query:
+             # live_pos = query_db_for_pos(self.db_session, self.user_sub_obj.id, symbol)
+             # if live_pos: update self.active_position_side, self.position_entry_price, self.position_qty
+             # return live_pos
+             pass
         
-        try: # Fetch and join HTF data
-            ohlcv_htf = exchange_ccxt.fetch_ohlcv(self.symbol, self.htf, limit=self.slow_len + self.signal_len + 50)
-            if not ohlcv_htf: logger.warning(f"[{self.name}-{self.symbol}] Could not fetch HTF data."); return
-            df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms'); df_htf.set_index('timestamp', inplace=True)
-            htf_macd_df = self._calculate_macd(df_htf, self.fast_len, self.slow_len, self.signal_len)
-            df = pd.merge_asof(df.sort_index(), htf_macd_df.sort_index().add_prefix('htf_'), left_index=True, right_index=True, direction='forward')
-        except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching/processing HTF data: {e}", exc_info=True); return
+        return None
+
+    def _place_order(self, symbol, order_type, side, quantity, price=None, params=None, current_simulated_time_utc=None):
+        if current_simulated_time_utc:
+             self.logger.info(f"BACKTEST_SIM: Place {side} {order_type} for {quantity} {symbol} at {price if price else 'Market'}")
+             return {"id": f"sim_{datetime.utcnow().timestamp()}", "status": "open", "simulated": True, "price": price, "amount": quantity}
+        try:
+            formatted_qty = self._format_quantity(quantity)
+            formatted_price = self._format_price(price) if price else None
+            order = self.exchange_ccxt.create_order(symbol, order_type, side, float(formatted_qty), float(formatted_price) if formatted_price else None, params)
+            self.logger.info(f"Order placed: {side} {order_type} {formatted_qty} {symbol} at {formatted_price if formatted_price else 'Market'}. OrderID: {order.get('id')}")
+            # TODO: Record order in DB
+            return order
+        except Exception as e:
+            self.logger.error(f"Failed to place {side} {order_type} for {symbol}: {e}", exc_info=True)
+        return None
+
+    def _close_all_positions(self, symbol, current_simulated_time_utc=None, historical_data_feed=None, is_backtest=False):
+        pos_details = self._get_current_position_details(symbol, historical_data_feed, is_backtest)
+        if pos_details:
+            close_side = 'sell' if pos_details['side'] == 'long' else 'buy'
+            self.logger.info(f"Closing all positions for {symbol} (side: {pos_details['side']}, qty: {pos_details['qty']}).")
+            self._place_order(symbol, 'MARKET', close_side, pos_details['qty'], params={'reduceOnly': True}, current_simulated_time_utc=current_simulated_time_utc)
+            # TODO: DB Update for position close.
+            # self._cancel_active_sl_tp_orders(symbol, current_simulated_time_utc) # Assumes this method exists
+            self.active_position_side = None
+            self.position_entry_price = None
+            self.position_qty = Decimal("0")
+            self.active_sl_tp_orders = {}
+
+
+    def _process_trading_logic(self, chart_ohlcv_df, htf_ohlcv_df, is_backtest=False, current_simulated_time_utc=None, historical_data_feed=None):
+        chart_macd_vals, chart_signal_vals, _ = self._calculate_macd_values(chart_ohlcv_df)
+        htf_macd_vals, htf_signal_vals, _ = self._calculate_macd_values(htf_ohlcv_df)
+
+        if chart_macd_vals is None or htf_macd_vals is None or len(chart_macd_vals) < 2 or len(htf_macd_vals) < 1:
+            self.logger.warning("Not enough data for MACD calculations.")
+            return {"action": "HOLD", "reason": "MACD calc error"} if is_backtest else None
         
-        df.fillna(method='ffill', inplace=True); df.dropna(inplace=True)
-        if len(df) < 2: logger.warning(f"[{self.name}-{self.symbol}] Not enough processed data for signal."); return
+        latest_chart_macd = chart_macd_vals[-1]
+        latest_chart_signal = chart_signal_vals[-1]
+        prev_chart_macd = chart_macd_vals[-2]
+        prev_chart_signal = chart_signal_vals[-2]
+        latest_htf_macd = htf_macd_vals[-1]
+        latest_htf_signal = htf_signal_vals[-1]
 
-        latest = df.iloc[-1]; prev = df.iloc[-2]; current_price = latest['close']
+        is_chart_uptrend, is_chart_downtrend = self._determine_trend(latest_chart_macd, latest_chart_signal)
+        is_htf_uptrend, _ = self._determine_trend(latest_htf_macd, latest_htf_signal)
+        _, is_htf_downtrend = self._determine_trend(latest_htf_macd, latest_htf_signal)
 
-        # Trend and Trigger Logic
-        htf_trend_val = latest['htf_macd'] - latest['htf_signal'] if self.trend_determination == 'MACD - Signal' else latest['htf_macd']
-        htf_uptrend = htf_trend_val > 0; htf_downtrend = htf_trend_val < 0
+        chart_trigger_up = prev_chart_macd <= prev_chart_signal and latest_chart_macd > latest_chart_signal
+        chart_trigger_down = prev_chart_macd >= prev_chart_signal and latest_chart_macd < latest_chart_signal
+
+        current_close_price = Decimal(str(chart_ohlcv_df['close'].iloc[-1]))
+
+        if is_chart_uptrend:
+            if not self.is_prev_chart_uptrend:
+                self.current_uptrend_init_price = current_close_price
+                self.current_uptrend_idx = 0
+                self.logger.info(f"Chart uptrend started. Init price: {self.current_uptrend_init_price}, Index: {self.current_uptrend_idx}")
+                if chart_trigger_up:
+                    self._calculate_forecast_bands(1, self.current_uptrend_init_price)
+            else:
+                self.current_uptrend_idx += 1
+            self._populate_memory(1, self.current_uptrend_idx, self.current_uptrend_init_price, current_close_price)
         
-        primary_trend_val_now = latest['macd'] - latest['signal'] if self.trend_determination == 'MACD - Signal' else latest['macd']
-        primary_trend_val_prev = prev['macd'] - prev['signal'] if self.trend_determination == 'MACD - Signal' else prev['macd']
+        if is_chart_downtrend:
+            if self.is_prev_chart_uptrend is None or self.is_prev_chart_uptrend:
+                self.current_downtrend_init_price = current_close_price
+                self.current_downtrend_idx = 0
+                self.logger.info(f"Chart downtrend started. Init price: {self.current_downtrend_init_price}, Index: {self.current_downtrend_idx}")
+                if chart_trigger_down:
+                    self._calculate_forecast_bands(0, self.current_downtrend_init_price)
+            else:
+                self.current_downtrend_idx += 1
+            self._populate_memory(0, self.current_downtrend_idx, self.current_downtrend_init_price, current_close_price)
+
+        self.is_prev_chart_uptrend = is_chart_uptrend
+
+        long_condition = chart_trigger_up and is_chart_uptrend and is_htf_uptrend
+        short_condition = chart_trigger_down and is_chart_downtrend and is_htf_downtrend
+
+        # Update position details before making decisions
+        current_pos_details = self._get_current_position_details(self.trading_pair, historical_data_feed, is_backtest)
+        if current_pos_details and self.active_position_side is None: # Adopt if strategy doesn't know about it
+            self.active_position_side = current_pos_details['side']
+            self.position_entry_price = current_pos_details['entry_price']
+            self.position_qty = current_pos_details['qty']
+            self.logger.info(f"Adopted position found: {self.active_position_side} Qty: {self.position_qty}")
+
+
+        if (long_condition and self.active_position_side == 'short') or \
+           (short_condition and self.active_position_side == 'long'):
+            self.logger.info("Signal opposite to current position. Closing position first.")
+            self._close_all_positions(self.trading_pair, current_simulated_time_utc, historical_data_feed, is_backtest)
         
-        primary_uptrend_now = primary_trend_val_now > 0; primary_downtrend_now = primary_trend_val_now < 0
-        primary_uptrend_prev = primary_trend_val_prev > 0; primary_downtrend_prev = primary_trend_val_prev < 0
+        action_taken_this_cycle = False
+        if not self.active_position_side:
+            entry_price = current_close_price
+            if entry_price == Decimal("0"): # Avoid division by zero
+                self.logger.warning("Entry price is zero, cannot calculate quantity.")
+                return {"action": "HOLD", "reason": "Entry price is zero"} if is_backtest else None
+            qty_to_trade = self.order_quantity_usd / entry_price
 
-        crossed_above = primary_trend_val_prev <= 0 and primary_trend_val_now > 0
-        crossed_below = primary_trend_val_prev >= 0 and primary_trend_val_now < 0
-        trigger = crossed_above or crossed_below
+            sl_price = None
+            tp_price = None
 
-        # Forecast state updates (conceptual, as true Pine-like state is hard)
-        if primary_uptrend_now and not primary_uptrend_prev: self.forecast_state['uptrend_init_price'] = current_price
-        if primary_downtrend_now and not primary_downtrend_prev: self.forecast_state['downtrend_init_price'] = current_price
-        if primary_uptrend_now: self._populate_forecast_memory(True, current_price)
-        if primary_downtrend_now: self._populate_forecast_memory(False, current_price)
-        self.forecast_state['up_idx_counter'] = 0 if not primary_uptrend_now else self.forecast_state['up_idx_counter'] + 1
-        self.forecast_state['dn_idx_counter'] = 0 if not primary_downtrend_now else self.forecast_state['dn_idx_counter'] + 1
-        # if trigger: forecast_bands = self._generate_forecast_bands(primary_uptrend_now, current_price, len(df)-1) # Example call
+            if long_condition:
+                self.logger.info(f"Trading Signal: ENTER LONG for {self.trading_pair} at {entry_price}")
+                entry_order = self._place_order(self.trading_pair, 'MARKET', 'buy', qty_to_trade, current_simulated_time_utc=current_simulated_time_utc)
+                if entry_order or is_backtest:
+                    self.active_position_side = 'long'
+                    self.position_entry_price = entry_price
+                    self.position_qty = qty_to_trade
+                    self.logger.info(f"DB_TODO: Create Position LONG {self.trading_pair}")
+                    if self.use_stop_loss: sl_price = entry_price * (Decimal('1') - self.stop_loss_pct)
+                    if self.use_take_profit: tp_price = entry_price * (Decimal('1') + self.take_profit_pct)
+                    if sl_price:
+                        sl_ord = self._place_order(self.trading_pair, 'STOP_MARKET', 'sell', qty_to_trade, params={'stopPrice': self._format_price(sl_price), 'reduceOnly': True}, current_simulated_time_utc=current_simulated_time_utc)
+                        if sl_ord: self.active_sl_tp_orders['sl_id'] = sl_ord.get('id')
+                    if tp_price:
+                        tp_ord = self._place_order(self.trading_pair, 'TAKE_PROFIT_MARKET', 'sell', qty_to_trade, params={'stopPrice': self._format_price(tp_price), 'reduceOnly': True}, current_simulated_time_utc=current_simulated_time_utc)
+                        if tp_ord: self.active_sl_tp_orders['tp_id'] = tp_ord.get('id')
+                    action_taken_this_cycle = True
+                    if is_backtest: return {"action": "ENTER_LONG", "price": float(entry_price), "qty": float(qty_to_trade), "sl": float(sl_price) if sl_price else None, "tp": float(tp_price) if tp_price else None}
 
-        position_db = db_session.query(Position).filter(Position.subscription_id == subscription_id, Position.symbol == self.symbol, Position.is_open == True).first()
+            elif short_condition:
+                self.logger.info(f"Trading Signal: ENTER SHORT for {self.trading_pair} at {entry_price}")
+                entry_order = self._place_order(self.trading_pair, 'MARKET', 'sell', qty_to_trade, current_simulated_time_utc=current_simulated_time_utc)
+                if entry_order or is_backtest: # If order placed or simulating
+                    self.active_position_side = 'short'
+                    self.position_entry_price = entry_price
+                    self.position_qty = qty_to_trade
+                    self.logger.info(f"DB_TODO: Create Position SHORT {self.trading_pair}")
+                    if self.use_stop_loss: sl_price = entry_price * (Decimal('1') + self.stop_loss_pct)
+                    if self.use_take_profit: tp_price = entry_price * (Decimal('1') - self.take_profit_pct)
+                    if sl_price:
+                        sl_ord = self._place_order(self.trading_pair, 'STOP_MARKET', 'buy', qty_to_trade, params={'stopPrice': self._format_price(sl_price), 'reduceOnly': True}, current_simulated_time_utc=current_simulated_time_utc)
+                        if sl_ord: self.active_sl_tp_orders['sl_id'] = sl_ord.get('id')
+                    if tp_price:
+                        tp_ord = self._place_order(self.trading_pair, 'TAKE_PROFIT_MARKET', 'buy', qty_to_trade, params={'stopPrice': self._format_price(tp_price), 'reduceOnly': True}, current_simulated_time_utc=current_simulated_time_utc)
+                        if tp_ord: self.active_sl_tp_orders['tp_id'] = tp_ord.get('id')
+                    action_taken_this_cycle = True
+                    if is_backtest: return {"action": "ENTER_SHORT", "price": float(entry_price), "qty": float(qty_to_trade), "sl": float(sl_price) if sl_price else None, "tp": float(tp_price) if tp_price else None}
 
-        # Exit Logic
-        if position_db:
-            exit_reason = None; side_to_close = None
-            if position_db.side == "long":
-                sl_price = position_db.entry_price * (1 - self.stop_loss_decimal)
-                tp_price = position_db.entry_price * (1 + self.take_profit_decimal)
-                if self.use_stop_loss and current_price <= sl_price: exit_reason = "SL"
-                elif self.use_take_profit and current_price >= tp_price: exit_reason = "TP"
-                elif trigger and primary_downtrend_now: exit_reason = "Opposing Signal (Short)" # Exit long on short signal
-                if exit_reason: side_to_close = 'sell'
-            elif position_db.side == "short":
-                sl_price = position_db.entry_price * (1 + self.stop_loss_decimal)
-                tp_price = position_db.entry_price * (1 - self.take_profit_decimal)
-                if self.use_stop_loss and current_price >= sl_price: exit_reason = "SL"
-                elif self.use_take_profit and current_price <= tp_price: exit_reason = "TP"
-                elif trigger and primary_uptrend_now: exit_reason = "Opposing Signal (Long)" # Exit short on long signal
-                if exit_reason: side_to_close = 'buy'
+        if action_taken_this_cycle or self.current_uptrend_idx == 0 or self.current_downtrend_idx == 0 :
+            self._save_persistent_state()
 
-            if exit_reason and side_to_close:
-                logger.info(f"[{self.name}-{self.symbol}] Closing {position_db.side} Pos ID {position_db.id} at {current_price}. Reason: {exit_reason}")
-                close_qty = self._format_quantity(position_db.amount, exchange_ccxt)
-                db_exit_order = self._create_db_order(db_session, subscription_id, position_id=position_db.id, symbol=self.symbol, order_type='market', side=side_to_close, amount=close_qty, status='pending_creation')
-                try:
-                    exit_receipt = exchange_ccxt.create_market_order(self.symbol, side_to_close, close_qty, params={'reduceOnly': True})
-                    db_exit_order.order_id = exit_receipt['id']; db_exit_order.status = 'open'; db_session.commit()
-                    filled_exit = self._await_order_fill(exchange_ccxt, exit_receipt['id'], self.symbol)
-                    if filled_exit and filled_exit['status'] == 'closed':
-                        db_exit_order.status='closed'; db_exit_order.price=filled_exit['average']; db_exit_order.filled=filled_exit['filled']; db_exit_order.cost=filled_exit['cost']; db_exit_order.updated_at=datetime.datetime.utcnow()
-                        position_db.is_open=False; position_db.closed_at=datetime.datetime.utcnow()
-                        pnl = (filled_exit['average'] - position_db.entry_price) * filled_exit['filled'] if position_db.side == 'long' else (position_db.entry_price - filled_exit['average']) * filled_exit['filled']
-                        position_db.pnl=pnl; position_db.updated_at = datetime.datetime.utcnow()
-                        logger.info(f"[{self.name}-{self.symbol}] {position_db.side} Pos ID {position_db.id} closed. PnL: {pnl:.2f}")
-                    else: logger.error(f"[{self.name}-{self.symbol}] Exit order {exit_receipt['id']} failed. Pos ID {position_db.id} might still be open."); db_exit_order.status = filled_exit.get('status', 'fill_check_failed') if filled_exit else 'fill_check_failed'
-                    db_session.commit()
-                except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error closing Pos ID {position_db.id}: {e}", exc_info=True); db_exit_order.status='error'; db_session.commit()
-                return # Action taken
+        if is_backtest and not action_taken_this_cycle:
+            return {"action": "HOLD", "reason": "No entry signal or already in position"}
+        return None
 
-        # Entry Logic
-        if not position_db:
-            entry_side = None
-            if crossed_above and primary_uptrend_now and htf_uptrend: entry_side = "long"
-            elif crossed_below and primary_downtrend_now and htf_downtrend: entry_side = "short"
 
-            if entry_side:
-                entry_qty = self._format_quantity(self.lot_size, exchange_ccxt) # Using fixed lot_size
-                if entry_qty <= 0: logger.warning(f"[{self.name}-{self.symbol}] Lot size zero or negative. Skipping."); return
-                logger.info(f"[{self.name}-{self.symbol}] {entry_side.upper()} entry signal at {current_price}. Size: {entry_qty}")
-                db_entry_order = self._create_db_order(db_session, subscription_id, symbol=self.symbol, order_type='market', side=entry_side, amount=entry_qty, status='pending_creation')
-                try:
-                    entry_receipt = exchange_ccxt.create_market_order(self.symbol, entry_side, entry_qty)
-                    db_entry_order.order_id = entry_receipt['id']; db_entry_order.status = 'open'; db_session.commit()
-                    filled_entry = self._await_order_fill(exchange_ccxt, entry_receipt['id'], self.symbol)
-                    if filled_entry and filled_entry['status'] == 'closed':
-                        db_entry_order.status='closed'; db_entry_order.price=filled_entry['average']; db_entry_order.filled=filled_entry['filled']; db_entry_order.cost=filled_entry['cost']; db_entry_order.updated_at=datetime.datetime.utcnow()
-                        
-                        new_pos = Position(subscription_id=subscription_id, symbol=self.symbol, exchange_name=str(exchange_ccxt.id), side=entry_side, amount=filled_entry['filled'], entry_price=filled_entry['average'], current_price=filled_entry['average'], is_open=True, created_at=datetime.datetime.utcnow(), updated_at=datetime.datetime.utcnow())
-                        db_session.add(new_pos); db_session.commit()
-                        logger.info(f"[{self.name}-{self.symbol}] {entry_side.upper()} Pos ID {new_pos.id} created. Entry: {new_pos.entry_price}, Size: {new_pos.amount}")
-                        
-                        # Place SL/TP (OCO not standard, place as separate)
-                        sl_tp_qty = self._format_quantity(new_pos.amount, exchange_ccxt)
-                        sl_trigger = new_pos.entry_price * (1 - self.stop_loss_decimal) if entry_side == 'long' else new_pos.entry_price * (1 + self.stop_loss_decimal)
-                        tp_limit = new_pos.entry_price * (1 + self.take_profit_decimal) if entry_side == 'long' else new_pos.entry_price * (1 - self.take_profit_decimal)
-                        sl_tp_side = 'sell' if entry_side == 'long' else 'buy'
+    def execute_live_signal(self, market_data_df=None):
+        self.logger.info(f"Executing {self.name} for {self.trading_pair} UserSubID {self.user_sub_obj.id}")
 
-                        if self.use_stop_loss:
-                            db_sl = self._create_db_order(db_session, subscription_id, position_id=new_pos.id, symbol=self.symbol, order_type='stop_market', side=sl_tp_side, amount=sl_tp_qty, price=self._format_price(sl_trigger, exchange_ccxt), status='pending_creation')
-                            try: sl_receipt = exchange_ccxt.create_order(self.symbol, 'stop_market', sl_tp_side, sl_tp_qty, params={'stopPrice': self._format_price(sl_trigger, exchange_ccxt), 'reduceOnly':True}); db_sl.order_id=sl_receipt['id']; db_sl.status='open'; logger.info(f"[{self.name}-{self.symbol}] SL order {sl_receipt['id']} for Pos {new_pos.id}")
-                            except Exception as e_sl: logger.error(f"[{self.name}-{self.symbol}] Error SL for Pos {new_pos.id}: {e_sl}", exc_info=True); db_sl.status='error'
-                            db_session.commit()
-                        if self.use_take_profit:
-                            db_tp = self._create_db_order(db_session, subscription_id, position_id=new_pos.id, symbol=self.symbol, order_type='limit', side=sl_tp_side, amount=sl_tp_qty, price=self._format_price(tp_limit, exchange_ccxt), status='pending_creation')
-                            try: tp_receipt = exchange_ccxt.create_limit_order(self.symbol, sl_tp_side, sl_tp_qty, self._format_price(tp_limit, exchange_ccxt), params={'reduceOnly':True}); db_tp.order_id=tp_receipt['id']; db_tp.status='open'; logger.info(f"[{self.name}-{self.symbol}] TP order {tp_receipt['id']} for Pos {new_pos.id}")
-                            except Exception as e_tp: logger.error(f"[{self.name}-{self.symbol}] Error TP for Pos {new_pos.id}: {e_tp}", exc_info=True); db_tp.status='error'
-                            db_session.commit()
-                    else: logger.error(f"[{self.name}-{self.symbol}] Entry order {entry_receipt['id']} failed. Pos not opened."); db_entry_order.status = filled_entry.get('status', 'fill_check_failed') if filled_entry else 'fill_check_failed'
-                    db_session.commit()
-                except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error during {entry_side} entry: {e}", exc_info=True); db_entry_order.status='error'; db_session.commit()
-        logger.debug(f"[{self.name}-{self.symbol}] Live signal check complete.")
+        if not self.trading_pair or self.trading_pair == "UNSPECIFIED/USDT":
+             self.trading_pair = self.params.get("trading_pair", "BTC/USDT")
+             if not self.trading_pair or self.trading_pair == "UNSPECIFIED/USDT":
+                  self.logger.error("Trading pair not specified for this strategy instance.")
+                  return
+
+        if self.is_prev_chart_uptrend is None and self.active_position_side is None: # Simple check if state seems uninitialized and no known active pos
+            self._load_persistent_state()
+
+        # TODO: Check if a live position was closed by SL/TP on exchange by querying active orders/positions.
+        # If self.active_position_side is set, but fetch_positions shows no such position, reset state.
+        # This is important for live trading to correctly re-sync with exchange state.
+        # Example:
+        # actual_live_pos = self.exchange_ccxt.fetch_positions([self.trading_pair]) # Simplified
+        # if not actual_live_pos_found and self.active_position_side:
+        #    self.logger.info("Position seems closed on exchange. Resetting state.")
+        #    self._reset_state_after_external_close() # New method to handle this cleanup
+        #    self._save_persistent_state()
+
+
+        chart_limit = max(self.macd_slow_len, self.macd_signal_len) + self.forecast_max_memory + 50
+        htf_limit = max(self.macd_slow_len, self.macd_signal_len) + 50
+
+        try:
+            chart_ohlcv_list = self._get_ohlcv_data(self.chart_interval, chart_limit, is_backtest=False)
+            htf_ohlcv_list = self._get_ohlcv_data(self.htf_interval, htf_limit, is_backtest=False)
+
+            min_chart_len = max(self.macd_slow_len, self.macd_signal_len) +2 # Need at least 2 for prev values
+            min_htf_len = max(self.macd_slow_len, self.macd_signal_len) +1
+
+            if not chart_ohlcv_list or len(chart_ohlcv_list) < min_chart_len or \
+               not htf_ohlcv_list or len(htf_ohlcv_list) < min_htf_len:
+                self.logger.warning("Insufficient OHLCV data for chart or HTF for MACD calc.")
+                return
+
+            chart_ohlcv_df = pandas.DataFrame(chart_ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            chart_ohlcv_df['timestamp'] = pandas.to_datetime(chart_ohlcv_df['timestamp'], unit='ms')
+            # chart_ohlcv_df.set_index('timestamp', inplace=True) # Not strictly needed if using iloc
+
+            htf_ohlcv_df = pandas.DataFrame(htf_ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            htf_ohlcv_df['timestamp'] = pandas.to_datetime(htf_ohlcv_df['timestamp'], unit='ms')
+            # htf_ohlcv_df.set_index('timestamp', inplace=True)
+
+            self._process_trading_logic(chart_ohlcv_df, htf_ohlcv_df, is_backtest=False)
+
+        except Exception as e:
+            self.logger.error(f"Error in {self.name} execute_live_signal: {e}", exc_info=True)
+
+
+    def run_backtest(self, historical_data_feed, current_simulated_time_utc):
+        chart_limit = max(self.macd_slow_len, self.macd_signal_len) + self.forecast_max_memory + 50
+        htf_limit = max(self.macd_slow_len, self.macd_signal_len) + 50
+
+        chart_ohlcv_df = historical_data_feed.get_ohlcv(self.trading_pair, self.chart_interval, chart_limit, end_time_utc=current_simulated_time_utc)
+        htf_ohlcv_df = historical_data_feed.get_ohlcv(self.trading_pair, self.htf_interval, htf_limit, end_time_utc=current_simulated_time_utc)
+
+        min_chart_len = max(self.macd_slow_len, self.macd_signal_len) +2
+        min_htf_len = max(self.macd_slow_len, self.macd_signal_len) +1
+
+        if chart_ohlcv_df is None or chart_ohlcv_df.empty or htf_ohlcv_df is None or htf_ohlcv_df.empty or \
+           len(chart_ohlcv_df) < min_chart_len or len(htf_ohlcv_df) < min_htf_len:
+            return {"action": "HOLD", "reason": "Insufficient historical data for MACD"}
+
+        return self._process_trading_logic(chart_ohlcv_df, htf_ohlcv_df, is_backtest=True,
+                                           current_simulated_time_utc=current_simulated_time_utc,
+                                           historical_data_feed=historical_data_feed)
+
+```
