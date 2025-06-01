@@ -1,249 +1,592 @@
-# trading_platform/strategies/premarket_breakout_strategy.py
-import datetime
-import pytz 
-import pandas as pd
 import logging
-import time
-import json # For UserStrategySubscription parameters
-from sqlalchemy.orm import Session
-from backend.models import Position, Order, UserStrategySubscription
+from datetime import datetime, time, date, timedelta
+import pytz
+import numpy as np # May not be strictly needed if all TA is via price action
+import ccxt
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
-logger = logging.getLogger(__name__)
+# Assuming platform models are accessible for type hinting if needed,
+# but the strategy itself won't import them directly for creation/update.
+# from backend.models import Order, Position
 
-class PremarketBreakoutStrategy:
-    def __init__(self, symbol: str, timeframe: str, capital: float = 10000, **custom_parameters):
-        self.name = "PremarketBreakoutStrategy"
-        self.symbol = symbol
-        self.timeframe_str = timeframe 
-        self.capital_param = capital # Store initial capital from params
+class PreMarketBreakout:
 
-        defaults = {
-            "orb_hour": 9, "orb_minute": 15, "orb_timezone": "America/New_York", # Using ORB naming for consistency
-            "tp_percent": 1.0, "sl_percent": 0.5,
-            "position_size_percent_capital": 10.0,
-            "lookback_bars_for_orb": 1, # Renamed from premarket_... to orb_...
-            "premarket_max_deviation_percent": 2.0 # Kept this specific param name
+    @staticmethod
+    def get_parameters_definition():
+        return {
+            "trading_pair": {"type": "str", "label": "Trading Pair (e.g., BTC/USDT:USDT)", "default": "BTC/USDT:USDT"},
+            "leverage": {"type": "int", "label": "Leverage", "default": 5, "min": 1, "max": 100},
+            "stop_loss_percent": {"type": "float", "label": "Stop Loss % (from entry)", "default": 0.005, "min": 0.001, "max": 0.1, "step": 0.0001}, # 0.5%
+            "take_profit_percent": {"type": "float", "label": "Take Profit % (from entry)", "default": 0.01, "min": 0.001, "max": 0.2, "step": 0.0001}, # 1%
+            "risk_allocation_percent": {"type": "float", "label": "Risk Allocation % (of equity per trade)", "default": 0.02, "min": 0.001, "max": 0.1, "step": 0.001}, # 2%
+            "kline_interval_for_levels": {"type": "str", "label": "Kline Interval for Pre-Market Levels", "default": "5m", "choices": ["1m", "3m", "5m", "15m"]},
+            "kline_interval_for_breakout": {"type": "str", "label": "Kline Interval for Breakout Signal", "default": "1m", "choices": ["1m", "3m", "5m"]},
+            "max_entry_deviation_percent": {"type": "float", "label": "Max Entry Price Deviation % (from breakout level)", "default": 0.001, "min": 0.0, "max": 0.01, "step": 0.0001}, # 0.1%
+            "pre_market_start_time_est": {"type": "str", "label": "Pre-Market Start Time (EST HH:MM)", "default": "07:30"},
+            "pre_market_end_time_est": {"type": "str", "label": "Pre-Market End Time (EST HH:MM)", "default": "09:29"},
+            "market_open_time_est": {"type": "str", "label": "Market Open Time (EST HH:MM)", "default": "09:30"},
+            "trading_session_end_time_est": {"type": "str", "label": "Trading Session End Time (EST HH:MM)", "default": "15:55"}, # EOD close a bit before actual market close
+            "est_timezone": {"type": "str", "label": "EST Timezone Name", "default": "US/Eastern", "choices": ["US/Eastern", "America/New_York"]},
         }
-        self_params = {**defaults, **custom_parameters}
-        # Ensure correct types for parameters
-        self.orb_hour = int(self_params["orb_hour"])
-        self.orb_minute = int(self_params["orb_minute"])
-        self.orb_timezone = str(self_params["orb_timezone"])
-        self.tp_percent = float(self_params["tp_percent"])
-        self.sl_percent = float(self_params["sl_percent"])
-        self.position_size_percent_capital = float(self_params["position_size_percent_capital"])
-        self.lookback_bars_for_orb = int(self_params["lookback_bars_for_orb"])
-        self.premarket_max_deviation_percent = float(self_params["premarket_max_deviation_percent"])
+
+    def __init__(self, db_session, user_sub_obj, strategy_params: dict, exchange_ccxt, logger=None):
+        self.db_session = db_session
+        self.user_sub_obj = user_sub_obj
+        self.params = strategy_params
+        self.exchange_ccxt = exchange_ccxt
+        self.logger = logger if logger else logging.getLogger(__name__)
+        self.name = "PreMarketBreakout"
+
+        # Parse parameters
+        self.trading_pair = self.params.get("trading_pair", "BTC/USDT:USDT")
+        self.leverage = int(self.params.get("leverage", 5))
+        self.stop_loss_percent = Decimal(str(self.params.get("stop_loss_percent", "0.005")))
+        self.take_profit_percent = Decimal(str(self.params.get("take_profit_percent", "0.01")))
+        self.risk_allocation_percent = Decimal(str(self.params.get("risk_allocation_percent", "0.02")))
+        self.kline_interval_for_levels = self.params.get("kline_interval_for_levels", "5m")
+        self.kline_interval_for_breakout = self.params.get("kline_interval_for_breakout", "1m")
+        self.max_entry_deviation_percent = Decimal(str(self.params.get("max_entry_deviation_percent", "0.001")))
         
-        # These are specific to the strategy's original naming, map them from ORB for internal use if needed
-        # Or, adjust internal logic to use orb_hour/minute directly. For now, map for less internal change:
-        self.premarket_start_hour_est = custom_parameters.get("premarket_start_hour_est", 7) # Example: if specific PM times are still needed
-        self.premarket_start_minute_est = custom_parameters.get("premarket_start_minute_est", 30)
-        self.premarket_end_hour_est = self.orb_hour # Align with ORB definition
-        self.premarket_end_minute_est = self.orb_minute 
-        self.market_open_hour_est = self.orb_hour # Market open is when ORB period ends
-        self.market_open_minute_est = self.orb_minute
+        self.est_timezone_str = self.params.get("est_timezone", "US/Eastern")
+        self.est_tz = pytz.timezone(self.est_timezone_str)
 
         try:
-            self.pytz_orb_timezone = pytz.timezone(self.orb_timezone)
-        except pytz.UnknownTimeZoneError:
-            logger.warning(f"[{self.name}-{self.symbol}] Unknown ORB timezone '{self.orb_timezone}', defaulting to UTC.")
-            self.pytz_orb_timezone = pytz.utc; self.orb_timezone = "UTC"
+            self.pre_market_start_time = datetime.strptime(self.params.get("pre_market_start_time_est", "07:30"), '%H:%M').time()
+            self.pre_market_end_time = datetime.strptime(self.params.get("pre_market_end_time_est", "09:29"), '%H:%M').time()
+            self.market_open_time = datetime.strptime(self.params.get("market_open_time_est", "09:30"), '%H:%M').time()
+            self.trading_session_end_time = datetime.strptime(self.params.get("trading_session_end_time_est", "15:55"), '%H:%M').time()
+        except ValueError as e:
+            self.logger.error(f"Error parsing time parameters: {e}. Using defaults.")
+            # Fallback to defaults if parsing fails
+            self.pre_market_start_time = time(7, 30)
+            self.pre_market_end_time = time(9, 29)
+            self.market_open_time = time(9, 30)
+            self.trading_session_end_time = time(15, 55)
 
-        self.tp_decimal = self.tp_percent / 100.0
-        self.sl_decimal = self.sl_percent / 100.0
-        self.position_size_percent_capital_decimal = self.position_size_percent_capital / 100.0
-        self.premarket_max_deviation_decimal = self.premarket_max_deviation_percent / 100.0
+        # State variables
+        self.premarket_high = None
+        self.premarket_low = None
+        self.max_deviation_high_entry = None # Calculated when levels are set
+        self.max_deviation_low_entry = None  # Calculated when levels are set
+        self.initialized_for_session_date = None # Stores the EST date for which levels are initialized
+        self.last_trade_candle_timestamp = None # Timestamp of the last candle that resulted in a trade action
+        self.target_notional_usdt_for_trade = Decimal("0.0") # Calculated based on equity and risk allocation
 
-        # In-memory state for ORB range (refreshed daily)
-        self.opening_range_high = None
-        self.opening_range_low = None
-        self.opening_range_set_for_date = None 
-        self.max_deviation_high = None # Calculated after ORB set
-        self.max_deviation_low = None  # Calculated after ORB set
+        self.quantity_precision = None
+        self.price_precision = None
+        self._fetch_market_precision()
+
+        try:
+            if hasattr(self.exchange_ccxt, 'set_leverage') and self.trading_pair.endswith(':USDT'): # Common suffix for futures
+                self.exchange_ccxt.set_leverage(self.leverage, self.trading_pair)
+                self.logger.info(f"Leverage set to {self.leverage}x for {self.trading_pair}")
+        except Exception as e:
+            self.logger.error(f"Failed to set leverage for {self.trading_pair}: {e}")
+
+        self.logger.info(f"{self.name} strategy initialized for UserSubID {self.user_sub_obj.id if self.user_sub_obj else 'N/A'} with params (subset): pair={self.trading_pair}, leverage={self.leverage}")
+
+    def _get_current_est_datetime(self, current_utc_dt=None):
+        if current_utc_dt is None:
+            current_utc_dt = datetime.utcnow()
+        return current_utc_dt.replace(tzinfo=pytz.utc).astimezone(self.est_tz)
+
+    def _fetch_market_precision(self):
+        try:
+            self.exchange_ccxt.load_markets()
+            market_info = self.exchange_ccxt.markets[self.trading_pair]
+            self.quantity_precision = int(market_info['precision']['amount'] if market_info['precision']['amount'] is not None else 8) # Default if None
+            self.price_precision = int(market_info['precision']['price'] if market_info['precision']['price'] is not None else 8) # Default if None
+            self.logger.info(f"Precision for {self.trading_pair}: Qty DP={self.quantity_precision}, Price DP={self.price_precision}")
+        except Exception as e:
+            self.logger.error(f"Error fetching market precision for {self.trading_pair}: {e}. Using defaults (8,8).")
+            self.quantity_precision = 8 # Default decimal places
+            self.price_precision = 8  # Default decimal places
+
+    def _format_quantity(self, quantity: Decimal):
+        return quantity.quantize(Decimal('1e-' + str(self.quantity_precision)), rounding=ROUND_DOWN)
+
+    def _format_price(self, price: Decimal):
+        return price.quantize(Decimal('1e-' + str(self.price_precision)), rounding=ROUND_DOWN) # Or ROUND_NEAREST depending on exchange
+
+    def _reset_daily_state(self):
+        self.premarket_high = None
+        self.premarket_low = None
+        self.max_deviation_high_entry = None
+        self.max_deviation_low_entry = None
+        self.initialized_for_session_date = None
+        # self.last_trade_candle_timestamp = None # Don't reset this, it's per candle, not per day
+        self.logger.info("Daily state reset.")
+
+    def _initialize_session_levels(self, effective_est_datetime, historical_data_feed=None):
+        est_date_to_fetch_for = effective_est_datetime.date()
+        if self.initialized_for_session_date == est_date_to_fetch_for:
+            self.logger.debug(f"Levels already initialized for {est_date_to_fetch_for}.")
+            return True
+
+        self.logger.info(f"Initializing pre-market levels for EST date: {est_date_to_fetch_for}")
+        self._reset_daily_state() # Reset before initializing
+
+        try:
+            high, low = self._get_premarket_levels(est_date_to_fetch_for, historical_data_feed)
+            if high is not None and low is not None:
+                self.premarket_high = Decimal(str(high))
+                self.premarket_low = Decimal(str(low))
+                self.max_deviation_high_entry = self.premarket_high * (Decimal("1") + self.max_entry_deviation_percent)
+                self.max_deviation_low_entry = self.premarket_low * (Decimal("1") - self.max_entry_deviation_percent)
+                self.initialized_for_session_date = est_date_to_fetch_for
+                self.logger.info(f"Pre-market levels for {est_date_to_fetch_for}: High={self.premarket_high}, Low={self.premarket_low}")
+                self._calculate_target_notional_usdt(historical_data_feed)
+                return True
+            else:
+                self.logger.warning(f"Failed to get pre-market levels for {est_date_to_fetch_for}.")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error initializing session levels: {e}", exc_info=True)
+            return False
+
+    def _get_premarket_levels(self, est_date_for_levels: date, historical_data_feed=None):
+        start_dt_est = self.est_tz.localize(datetime.combine(est_date_for_levels, self.pre_market_start_time))
+        end_dt_est = self.est_tz.localize(datetime.combine(est_date_for_levels, self.pre_market_end_time))
+
+        start_timestamp_ms = int(start_dt_est.timestamp() * 1000)
+        # Fetch up to, but not including, the end time candle. So, limit calculation needs care.
+        # Or fetch slightly after and filter.
+        # For simplicity, fetch_ohlcv usually includes the candle starting at 'since'
+        # and limit determines how many. We need candles *within* the range.
+
+        self.logger.info(f"Fetching pre-market OHLCV for {self.trading_pair} between {start_dt_est} and {end_dt_est} (EST)")
         
-        self.price_precision = 8; self.quantity_precision = 8
-        self._precisions_fetched_ = False
+        # Calculate number of candles needed (approx)
+        duration_seconds = (end_dt_est - start_dt_est).total_seconds()
+        interval_seconds = self.exchange_ccxt.parse_timeframe(self.kline_interval_for_levels)
+        limit_approx = int(duration_seconds / interval_seconds) + 5 # Add buffer
         
-        logger.info(f"[{self.name}-{self.symbol}] Initialized with effective params: {self_params}")
+        try:
+            if historical_data_feed:
+                ohlcv_data = historical_data_feed.get_ohlcv(
+                    symbol=self.trading_pair,
+                    interval=self.kline_interval_for_levels,
+                    since_utc_ms=start_timestamp_ms,
+                    limit=limit_approx, # Adjust limit as needed
+                    end_time_utc_ms=int(end_dt_est.timestamp() * 1000) # Pass end time for filtering in feed
+                )
+            else:
+                # Fetch slightly more and filter, as 'since' behavior can vary.
+                # Fetching for 1 day prior to ensure data availability if needed
+                ohlcv_data = self.exchange_ccxt.fetch_ohlcv(
+                    self.trading_pair,
+                    timeframe=self.kline_interval_for_levels,
+                    since=start_timestamp_ms - (24*60*60*1000), # Fetch more to be safe
+                    limit=limit_approx + 288 # Add more buffer for live
+                )
 
-    @classmethod
-    def get_parameters_definition(cls):
-        common_timezones = [ "UTC", "US/Eastern", "US/Central", "US/Pacific", "Europe/London", "America/New_York" ]
-        return {
-            "orb_hour": {"type": "int", "default": 9, "min": 0, "max": 23, "label": "Premarket End Hour (Timezone Specific)"}, # Renamed label for clarity
-            "orb_minute": {"type": "int", "default": 30, "min": 0, "max": 59, "label": "Premarket End Minute (Timezone Specific)"}, # Assuming this is end of premarket / start of ORB
-            "orb_timezone": {"type": "select", "default": "America/New_York", "options": common_timezones, "label": "Premarket/ORB Timezone"},
-            "lookback_bars_for_orb": {"type": "int", "default": 15, "min":1, "max":120, "label": "Premarket Duration (bars for ORB definition)", "description":"Number of bars of strategy's timeframe before Premarket End Time to define the range."},
-            "premarket_max_deviation_percent": {"type": "float", "default": 0.5, "min": 0.01, "max": 5.0, "step": 0.01, "label": "Max Price Deviation from Premarket (%)"},
-            "tp_percent": {"type": "float", "default": 1.0, "label": "Take Profit (%)"},
-            "sl_percent": {"type": "float", "default": 0.5, "label": "Stop Loss (%)"},
-            "position_size_percent_capital": {"type": "float", "default": 10.0, "label": "Position Size (% of Effective Capital)"}
-        }
+            if not ohlcv_data:
+                self.logger.warning("No OHLCV data returned for pre-market period.")
+                return None, None
 
-    def _get_precisions_live(self, exchange_ccxt):
-        if not self._precisions_fetched_:
-            try:
-                exchange_ccxt.load_markets(True)
-                market = exchange_ccxt.market(self.symbol)
-                self.price_precision = market['precision']['price']
-                self.quantity_precision = market['precision']['amount']
-                self._precisions_fetched_ = True
-                logger.info(f"[{self.name}-{self.symbol}] Precisions: Price={self.price_precision}, Qty={self.quantity_precision}")
-            except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching live precisions: {e}", exc_info=True)
+            # Filter candles strictly within the pre-market window
+            # OHLCV format: [timestamp, open, high, low, close, volume]
+            pre_market_candles = [
+                candle for candle in ohlcv_data
+                if candle[0] >= start_timestamp_ms and candle[0] < int(end_dt_est.timestamp() * 1000)
+            ]
 
-    def _format_price(self, price, exchange_ccxt): self._get_precisions_live(exchange_ccxt); return float(exchange_ccxt.price_to_precision(self.symbol, price))
-    def _format_quantity(self, quantity, exchange_ccxt): self._get_precisions_live(exchange_ccxt); return float(exchange_ccxt.amount_to_precision(self.symbol, quantity))
+            if not pre_market_candles:
+                self.logger.warning(f"No candles found within the pre-market range {start_dt_est} - {end_dt_est}")
+                return None, None
 
-    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str, timeout_seconds: int = 60, check_interval_seconds: int = 3):
-        start_time = time.time()
-        logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {timeout_seconds}s)")
-        while time.time() - start_time < timeout_seconds:
-            try:
-                order = exchange_ccxt.fetch_order(order_id, symbol)
-                logger.debug(f"[{self.name}-{self.symbol}] Order {order_id} status: {order['status']}")
-                if order['status'] == 'closed': logger.info(f"[{self.name}-{self.symbol}] Order {order_id} filled. AvgPrice: {order.get('average')}, Qty: {order.get('filled')}"); return order
-                if order['status'] in ['canceled', 'rejected', 'expired']: logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} is {order['status']}."); return order
-            except ccxt.OrderNotFound: logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} not found. Retrying.")
-            except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching order {order_id}: {e}. Retrying.", exc_info=True)
-            time.sleep(check_interval_seconds)
-        logger.warning(f"[{self.name}-{self.symbol}] Timeout for order {order_id}. Final check.")
-        try: final_status = exchange_ccxt.fetch_order(order_id, symbol); logger.info(f"[{self.name}-{self.symbol}] Final status for order {order_id}: {final_status['status']}"); return final_status
-        except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Final check for order {order_id} failed: {e}", exc_info=True); return None
+            highs = [candle[2] for candle in pre_market_candles]
+            lows = [candle[3] for candle in pre_market_candles]
 
-    def _create_db_order(self, db_session: Session, subscription_id: int, **kwargs):
-        db_order = Order(subscription_id=subscription_id, **kwargs); db_session.add(db_order); db_session.commit(); return db_order
+            return max(highs) if highs else None, min(lows) if lows else None
+        except Exception as e:
+            self.logger.error(f"Error fetching pre-market OHLCV: {e}", exc_info=True)
+            return None, None
 
-    def _update_orb_range(self, df_in_orb_tz: pd.DataFrame, current_bar_dt_orb_tz: datetime.datetime):
-        current_date_in_orb_tz = current_bar_dt_orb_tz.date()
-        if self.opening_range_set_for_date == current_date_in_orb_tz: return
+    def _calculate_target_notional_usdt(self, historical_data_feed=None):
+        try:
+            equity = Decimal("0.0")
+            if historical_data_feed:
+                equity = Decimal(str(historical_data_feed.get_current_equity()))
+            else:
+                balance = self.exchange_ccxt.fetch_balance(params={'type': 'future'}) # Ensure this is for futures
+                if 'USDT' in balance['total']:
+                    equity = Decimal(str(balance['total']['USDT']))
+                else:
+                    self.logger.warning("USDT balance not found in fetch_balance response.")
+                    self.target_notional_usdt_for_trade = Decimal("0.0")
+                    return
 
-        self.opening_range_high = None; self.opening_range_low = None
-        self.opening_range_set_for_date = current_date_in_orb_tz 
-
-        # Premarket End Time (also the ORB reference time)
-        pm_end_target_dt = datetime.datetime.combine(current_date_in_orb_tz, datetime.time(self.orb_hour, self.orb_minute), tzinfo=self.pytz_orb_timezone)
-        
-        # Filter data up to and including the ORB reference time
-        df_for_orb_calc = df_in_orb_tz[df_in_orb_tz.index <= pm_end_target_dt]
-        if df_for_orb_calc.empty: logger.debug(f"[{self.name}-{self.symbol}] No data up to ORB target time {pm_end_target_dt}."); return
-
-        # Get the last `lookback_bars_for_orb` from this filtered data
-        orb_slice_df = df_for_orb_calc.tail(self.lookback_bars_for_orb)
-        
-        if not orb_slice_df.empty and len(orb_slice_df) == self.lookback_bars_for_orb:
-            # Ensure all bars in slice are on the same day as the target ORB date
-            if all(b_idx.date() == current_date_in_orb_tz for b_idx in orb_slice_df.index):
-                self.opening_range_high = orb_slice_df['High'].max()
-                self.opening_range_low = orb_slice_df['Low'].min()
-                self.max_deviation_high = self.opening_range_high * (1 + self.premarket_max_deviation_decimal)
-                self.max_deviation_low = self.opening_range_low * (1 - self.premarket_max_deviation_decimal)
-                logger.info(f"[{self.name}-{self.symbol}] ORB Set for {current_date_in_orb_tz}: H={self.opening_range_high:.2f}, L={self.opening_range_low:.2f}. MaxDev H/L: {self.max_deviation_high:.2f}/{self.max_deviation_low:.2f}")
-            else: logger.debug(f"[{self.name}-{self.symbol}] ORB slice for {current_date_in_orb_tz} spanned multiple days. ORB not set.")
-        else: logger.debug(f"[{self.name}-{self.symbol}] Not enough bars ({len(orb_slice_df)}/{self.lookback_bars_for_orb}) for ORB on {current_date_in_orb_tz} ending {pm_end_target_dt}")
-
-    def run_backtest(self, historical_df: pd.DataFrame, htf_historical_df: pd.DataFrame = None):
-        logger.info(f"Running backtest for {self.name} on {self.symbol}...")
-        return {"pnl": 0, "trades": [], "message": "Backtest logic for PremarketBreakout needs to be reviewed and aligned with live logic if used for performance metrics."}
-
-    def execute_live_signal(self, db_session: Session, subscription_id: int, market_data_df: pd.DataFrame, exchange_ccxt, user_sub_obj: UserStrategySubscription):
-        logger.debug(f"[{self.name}-{self.symbol}] Executing live signal for sub {subscription_id}...")
-        if market_data_df.empty or len(market_data_df) < 4 : logger.warning(f"[{self.name}-{self.symbol}] Insufficient market data."); return
-        self._get_precisions_live(exchange_ccxt)
-
-        df_utc = market_data_df.copy()
-        if not isinstance(df_utc.index, pd.DatetimeIndex): df_utc.index = pd.to_datetime(df_utc.index)
-        if df_utc.index.tzinfo is None: df_utc = df_utc.tz_localize('UTC')
-        df_orb_tz = df_utc.tz_convert(self.pytz_orb_timezone)
-
-        current_bar_dt_orb_tz = df_orb_tz.index[-1]
-        self._update_orb_range(df_orb_tz, current_bar_dt_orb_tz)
-
-        if self.opening_range_high is None or self.opening_range_low is None or self.opening_range_set_for_date != current_bar_dt_orb_tz.date():
-            logger.debug(f"[{self.name}-{self.symbol}] ORB not set for current bar's date ({current_bar_dt_orb_tz.date()}). ORB set for: {self.opening_range_set_for_date}"); return
-        
-        # Market Open time in ORB timezone for the current bar's date
-        market_open_dt_orb_tz = datetime.datetime.combine(current_bar_dt_orb_tz.date(), datetime.time(self.orb_hour, self.orb_minute), tzinfo=self.pytz_orb_timezone)
-        # Note: The original script uses `market_open_hour_est` which might be different from `orb_hour`.
-        # For this strategy, "market open" is effectively when the ORB period ends and trading can begin.
-        
-        if current_bar_dt_orb_tz < market_open_dt_orb_tz: # Don't trade before market "open" (i.e., after ORB period defined)
-            logger.debug(f"[{self.name}-{self.symbol}] Market not yet open for breakout trading. Current: {current_bar_dt_orb_tz}, Open: {market_open_dt_orb_tz}"); return
-
-        latest_bar_orb_tz = df_orb_tz.iloc[-1]
-        price = latest_bar_orb_tz['Close'] # Use close of the last completed bar for decisions
-        
-        position_db = db_session.query(Position).filter(Position.subscription_id == subscription_id, Position.symbol == self.symbol, Position.is_open == True).first()
-
-        # Exit Logic
-        if position_db:
-            exit_reason = None; side_to_close = None; filled_exit_order = None
-            entry_price = position_db.entry_price
-            if position_db.side == "long":
-                sl_price = entry_price * (1 - self.sl_decimal); tp_price = entry_price * (1 + self.tp_decimal)
-                if price <= sl_price: exit_reason = "SL"
-                elif price >= tp_price: exit_reason = "TP"
-                elif price < self.opening_range_low: exit_reason = "Price re-entered ORB (Low)" # Exit if price falls back below ORB low
-                if exit_reason: side_to_close = 'sell'
-            elif position_db.side == "short":
-                sl_price = entry_price * (1 + self.sl_decimal); tp_price = entry_price * (1 - self.tp_decimal)
-                if price >= sl_price: exit_reason = "SL"
-                elif price <= tp_price: exit_reason = "TP"
-                elif price > self.opening_range_high: exit_reason = "Price re-entered ORB (High)" # Exit if price rises back above ORB high
-                if exit_reason: side_to_close = 'buy'
-
-            if exit_reason and side_to_close:
-                logger.info(f"[{self.name}-{self.symbol}] Closing {position_db.side} Pos ID {position_db.id} at {price}. Reason: {exit_reason}")
-                close_qty = self._format_quantity(position_db.amount, exchange_ccxt)
-                db_exit_order = self._create_db_order(db_session, subscription_id, symbol=self.symbol, order_type='market', side=side_to_close, amount=close_qty, status='pending_creation')
-                try:
-                    exit_receipt = exchange_ccxt.create_market_order(self.symbol, side_to_close, close_qty, params={'reduceOnly': True})
-                    db_exit_order.order_id = exit_receipt['id']; db_exit_order.status = 'open'; db_session.commit()
-                    filled_exit_order = self._await_order_fill(exchange_ccxt, exit_receipt['id'], self.symbol)
-                    if filled_exit_order and filled_exit_order['status'] == 'closed':
-                        db_exit_order.status='closed'; db_exit_order.price=filled_exit_order['average']; db_exit_order.filled=filled_exit_order['filled']; db_exit_order.cost=filled_exit_order['cost']; db_exit_order.updated_at=datetime.datetime.utcnow()
-                        position_db.is_open=False; position_db.closed_at=datetime.datetime.utcnow()
-                        pnl = (filled_exit_order['average'] - entry_price) * filled_exit_order['filled'] if position_db.side == 'long' else (entry_price - filled_exit_order['average']) * filled_exit_order['filled']
-                        position_db.pnl=pnl; position_db.updated_at = datetime.datetime.utcnow()
-                        logger.info(f"[{self.name}-{self.symbol}] {position_db.side} Pos ID {position_db.id} closed. PnL: {pnl:.2f}")
-                    else: logger.error(f"[{self.name}-{self.symbol}] Exit order {exit_receipt['id']} failed. Pos ID {position_db.id} open."); db_exit_order.status = filled_exit_order.get('status', 'fill_check_failed') if filled_exit_order else 'fill_check_failed'
-                    db_session.commit()
-                except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error closing Pos ID {position_db.id}: {e}", exc_info=True); db_exit_order.status='error'; db_session.commit()
+            if equity <= Decimal("0.0"):
+                self.logger.warning("Equity is zero or negative. Cannot calculate trade notional.")
+                self.target_notional_usdt_for_trade = Decimal("0.0")
                 return
 
-        # Entry Logic
-        if not position_db:
-            # Pine conditions: crossover(close, s_high) -> close > s_high AND close[1] <= s_high
-            # For live, we use the latest completed bar's close (`price`) and its previous bar's close (`prev_close`)
-            prev_close = df_orb_tz['Close'].iloc[-2] if len(df_orb_tz) >= 2 else price # Fallback if only one bar
-            
-            buy_cond = price > self.opening_range_high and prev_close <= self.opening_range_high and price <= self.max_deviation_high
-            sell_cond = price < self.opening_range_low and prev_close >= self.opening_range_low and price >= self.max_deviation_low
-            
-            entry_side = None
-            if buy_cond: entry_side = "long"
-            elif sell_cond: entry_side = "short"
+            self.target_notional_usdt_for_trade = equity * self.risk_allocation_percent * Decimal(str(self.leverage))
+            # This notional is what the position value should be. Qty will be derived from this.
+            self.logger.info(f"Calculated target notional USDT for trade: {self.target_notional_usdt_for_trade} (Equity: {equity})")
 
-            if entry_side:
-                allocated_capital = json.loads(user_sub_obj.custom_parameters).get("capital", self.capital_param)
-                position_size_usdt = allocated_capital * self.position_size_percent_capital_decimal
-                asset_qty_to_trade = self._format_quantity(position_size_usdt / price, exchange_ccxt)
-                if asset_qty_to_trade <= 0: logger.warning(f"[{self.name}-{self.symbol}] Asset quantity zero. Skipping."); return
+        except Exception as e:
+            self.logger.error(f"Error calculating target notional USDT: {e}", exc_info=True)
+            self.target_notional_usdt_for_trade = Decimal("0.0")
 
-                logger.info(f"[{self.name}-{self.symbol}] {entry_side.upper()} entry signal at {price}. Size: {asset_qty_to_trade}. ORB H:{self.opening_range_high:.2f}, L:{self.opening_range_low:.2f}")
-                db_entry_order = self._create_db_order(db_session, subscription_id, symbol=self.symbol, order_type='market', side=entry_side, amount=asset_qty_to_trade, status='pending_creation')
-                try:
-                    entry_receipt = exchange_ccxt.create_market_order(self.symbol, entry_side, asset_qty_to_trade)
-                    db_entry_order.order_id = entry_receipt['id']; db_entry_order.status = 'open'; db_session.commit()
-                    filled_entry_order = self._await_order_fill(exchange_ccxt, entry_receipt['id'], self.symbol)
-                    if filled_entry_order and filled_entry_order['status'] == 'closed':
-                        db_entry_order.status='closed'; db_entry_order.price=filled_entry_order['average']; db_entry_order.filled=filled_entry_order['filled']; db_entry_order.cost=filled_entry_order['cost']; db_entry_order.updated_at = datetime.datetime.utcnow()
-                        
-                        new_pos = Position(subscription_id=subscription_id, symbol=self.symbol, exchange_name=str(exchange_ccxt.id), side=entry_side, amount=filled_entry_order['filled'], entry_price=filled_entry_order['average'], current_price=filled_entry_order['average'], is_open=True, created_at=datetime.datetime.utcnow(), updated_at=datetime.datetime.utcnow())
-                        db_session.add(new_pos); db_session.commit()
-                        logger.info(f"[{self.name}-{self.symbol}] {entry_side.upper()} Pos ID {new_pos.id} created. Entry: {new_pos.entry_price}, Size: {new_pos.amount}")
-                        # Note: This strategy version doesn't place explicit SL/TP orders on exchange. It monitors price levels.
-                    else: logger.error(f"[{self.name}-{self.symbol}] Entry order {entry_receipt['id']} failed. Pos not opened."); db_entry_order.status = filled_entry_order.get('status', 'fill_check_failed') if filled_entry_order else 'fill_check_failed'
-                    db_session.commit()
-                except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error during {entry_side} entry: {e}", exc_info=True); db_entry_order.status='error'; db_session.commit()
-        logger.debug(f"[{self.name}-{self.symbol}] Live signal check complete.")
+
+    def _get_current_position_details(self, historical_data_feed=None):
+        # TODO: Robustly parse CCXT position data or use DB. This is a simplified placeholder.
+        if historical_data_feed:
+            return historical_data_feed.get_current_position(self.trading_pair) # Assumes feed provides this
+        try:
+            positions = self.exchange_ccxt.fetch_positions([self.trading_pair])
+            if positions:
+                # Find non-zero position for the symbol. CCXT fetch_positions can return multiple.
+                for pos in positions:
+                    if pos['symbol'] == self.trading_pair:
+                        contracts = Decimal(str(pos.get('contracts', '0'))) # Amount of base currency
+                        if 'info' in pos and 'positionAmt' in pos['info'] and contracts == Decimal('0'): # Binance specific
+                             contracts = Decimal(str(pos['info']['positionAmt']))
+
+                        if contracts != Decimal('0'):
+                            side = 'long' if contracts > Decimal('0') else 'short'
+                            entry_price = Decimal(str(pos.get('entryPrice', '0')))
+                            if entry_price == Decimal('0') and 'info' in pos and 'entryPrice' in pos['info']: # Binance
+                                entry_price = Decimal(str(pos['info']['entryPrice']))
+
+                            return {
+                                'side': side,
+                                'qty': abs(contracts),
+                                'entry_price': entry_price
+                            }
+            return None
+        except Exception as e:
+            self.logger.error(f"Error fetching current position for {self.trading_pair}: {e}")
+            return None
+
+    def _place_order_with_sl_tp(self, side, quantity_decimal: Decimal, entry_price_decimal: Decimal, sl_price_decimal: Decimal, tp_price_decimal: Decimal, current_simulated_time_utc=None):
+        formatted_qty = self._format_quantity(quantity_decimal)
+        # entry_price_str = self._format_price(entry_price_decimal) # Market order, so no price
+        sl_price_str = self._format_price(sl_price_decimal)
+        tp_price_str = self._format_price(tp_price_decimal)
+
+        action_details = {
+            "action": "OPEN_ORDER", "side": side, "symbol": self.trading_pair,
+            "qty": float(formatted_qty), "entry_approx": float(entry_price_decimal),
+            "sl": float(sl_price_str), "tp": float(tp_price_str),
+            "timestamp_utc": current_simulated_time_utc or datetime.utcnow()
+        }
+        self.logger.info(f"Placing order: {action_details}")
+
+        if current_simulated_time_utc: # Backtesting
+            self.logger.info(f"[BACKTEST] Simulating {side} order: Qty {formatted_qty} for {self.trading_pair} at market (entry ~{entry_price_decimal}), SL {sl_price_str}, TP {tp_price_str}")
+            # In a full backtest, this would interact with the backtest engine to simulate fill
+            return {"status": "simulated_open", "order_id": f"sim_{datetime.utcnow().timestamp()}", **action_details}
+
+        try:
+            # TODO: Record Order and Position in DB via self.db_session for live trades.
+            self._cancel_all_open_orders() # Clear any previous SL/TP before new trade
+
+            order_type = 'MARKET'
+            ccxt_side = 'buy' if side == 'long' else 'sell'
+
+            self.logger.info(f"Submitting MARKET {ccxt_side} order: {self.trading_pair}, Qty: {str(formatted_qty)}")
+            market_order = self.exchange_ccxt.create_order(self.trading_pair, order_type, ccxt_side, float(formatted_qty))
+            self.logger.info(f"Market order response: {market_order.get('id', 'N/A')}")
+            # Actual entry price might differ, could fetch last trade or use order details if available quickly
+
+            sl_ccxt_side = 'sell' if side == 'long' else 'buy'
+            tp_ccxt_side = 'sell' if side == 'long' else 'buy' # Same as SL for closing
+
+            sl_params = {'stopPrice': str(sl_price_str), 'reduceOnly': True} # Ensure reduceOnly if exchange supports
+            self.logger.info(f"Submitting STOP_MARKET {sl_ccxt_side} (SL) order: {self.trading_pair}, Qty: {str(formatted_qty)}, Stop: {sl_price_str}")
+            sl_order = self.exchange_ccxt.create_order(self.trading_pair, 'STOP_MARKET', sl_ccxt_side, float(formatted_qty), params=sl_params)
+            self.logger.info(f"SL order response: {sl_order.get('id', 'N/A')}")
+
+            # TP order: Some exchanges use 'TAKE_PROFIT_MARKET' or require limit price for TAKE_PROFIT
+            tp_params = {'stopPrice': str(tp_price_str), 'reduceOnly': True} # Price is trigger for TAKE_PROFIT_MARKET
+            self.logger.info(f"Submitting TAKE_PROFIT_MARKET {tp_ccxt_side} (TP) order: {self.trading_pair}, Qty: {str(formatted_qty)}, Trigger: {tp_price_str}")
+            tp_order = self.exchange_ccxt.create_order(self.trading_pair, 'TAKE_PROFIT_MARKET', tp_ccxt_side, float(formatted_qty), params=tp_params)
+            self.logger.info(f"TP order response: {tp_order.get('id', 'N/A')}")
+
+            return {"status": "live_orders_placed", "market_order_id": market_order.get('id'), **action_details}
+
+        except Exception as e:
+            self.logger.error(f"Error placing live order for {self.trading_pair}: {e}", exc_info=True)
+            return {"status": "error", "message": str(e), **action_details}
+
+    def _close_position(self, current_side, current_qty_decimal: Decimal, current_price_for_closing_decimal: Decimal, reason="signal", current_simulated_time_utc=None):
+        formatted_qty = self._format_quantity(current_qty_decimal)
+        action_details = {
+            "action": "CLOSE_POSITION", "side_closed": current_side, "symbol": self.trading_pair,
+            "qty": float(formatted_qty), "price_approx": float(current_price_for_closing_decimal), "reason": reason,
+            "timestamp_utc": current_simulated_time_utc or datetime.utcnow()
+        }
+        self.logger.info(f"Closing position: {action_details}")
+
+        if current_simulated_time_utc: # Backtesting
+            self.logger.info(f"[BACKTEST] Simulating CLOSE {current_side} position: Qty {formatted_qty} for {self.trading_pair} at market (price ~{current_price_for_closing_decimal})")
+            return {"status": "simulated_close", **action_details}
+
+        try:
+            # TODO: Update Position in DB to closed via self.db_session for live trades.
+            self._cancel_all_open_orders() # Cancel associated SL/TP
+
+            ccxt_side = 'sell' if current_side == 'long' else 'buy'
+            self.logger.info(f"Submitting MARKET {ccxt_side} (close) order: {self.trading_pair}, Qty: {str(formatted_qty)}")
+            close_order = self.exchange_ccxt.create_order(self.trading_pair, 'MARKET', ccxt_side, float(formatted_qty), params={'reduceOnly': True})
+            self.logger.info(f"Close order response: {close_order.get('id', 'N/A')}")
+            return {"status": "live_close_order_placed", "close_order_id": close_order.get('id'), **action_details}
+
+        except Exception as e:
+            self.logger.error(f"Error closing live position for {self.trading_pair}: {e}", exc_info=True)
+            return {"status": "error", "message": str(e), **action_details}
+
+    def _cancel_all_open_orders(self, current_simulated_time_utc=None):
+        if current_simulated_time_utc: # Backtesting
+            self.logger.info(f"[BACKTEST] Simulating cancel all open orders for {self.trading_pair}")
+            return {"status": "simulated_cancel_all"}
+        try:
+            self.exchange_ccxt.cancel_all_orders(self.trading_pair)
+            self.logger.info(f"Cancelled all open orders for {self.trading_pair}")
+            return {"status": "live_orders_cancelled"}
+        except Exception as e:
+            self.logger.error(f"Error cancelling orders for {self.trading_pair}: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    def _eod_close_logic(self, current_est_datetime, current_price_for_closing_decimal: Decimal, current_simulated_time_utc=None):
+        self.logger.info(f"EOD check at {current_est_datetime.strftime('%Y-%m-%d %H:%M:%S')} EST")
+        position = self._get_current_position_details(historical_data_feed=current_simulated_time_utc is not None) # Pass feed if backtesting
+        if position:
+            self.logger.info(f"EOD: Open position found for {self.trading_pair}. Closing it.")
+            self._close_position(position['side'], position['qty'], current_price_for_closing_decimal, reason="EOD", current_simulated_time_utc=current_simulated_time_utc)
+        
+        self._cancel_all_open_orders(current_simulated_time_utc=current_simulated_time_utc) # Also cancel any pending entry orders
+        self._reset_daily_state() # Reset for next day
+        return {"action": "EOD_CLOSE_RESET"}
+
+
+    def execute_live_signal(self, market_data_df=None): # market_data_df is not used here as we fetch specific klines
+        now_est = self._get_current_est_datetime()
+        now_est_time = now_est.time()
+        
+        # Initialize daily levels after market open or if not yet initialized for the day
+        if now_est_time >= self.market_open_time and \
+           (self.initialized_for_session_date is None or self.initialized_for_session_date != now_est.date()):
+            if not self._initialize_session_levels(now_est):
+                self.logger.warning("Failed to initialize session levels. Cannot proceed with trading logic.")
+                return {"action": "HOLD", "reason": "Failed level initialization"}
+
+        if not self.premarket_high or not self.premarket_low: # Levels not set
+            if now_est_time < self.market_open_time and now_est_time >= self.pre_market_start_time:
+                 self.logger.info(f"Pre-market period. Levels not yet finalized. Current EST: {now_est_time}")
+            elif now_est_time >= self.market_open_time:
+                 self.logger.warning(f"Market open but pre-market levels are not set. Attempting re-init.")
+                 if not self._initialize_session_levels(now_est): # Try again
+                      return {"action": "HOLD", "reason": "Levels not set post market open"}
+            else: # Before pre-market start
+                self.logger.info(f"Outside trading session hours. Current EST: {now_est_time}")
+            return {"action": "HOLD", "reason": "Levels not set or outside trading hours"}
+
+        # EOD Close Logic
+        if now_est_time >= self.trading_session_end_time:
+            # Fetch current price for EOD close
+            try:
+                ticker = self.exchange_ccxt.fetch_ticker(self.trading_pair)
+                eod_close_price = Decimal(str(ticker['last']))
+                return self._eod_close_logic(now_est, eod_close_price)
+            except Exception as e:
+                self.logger.error(f"Failed to fetch price for EOD close: {e}")
+                return {"action": "ERROR", "reason": "Failed EOD price fetch"}
+
+        # Fetch latest klines for breakout check
+        try:
+            # Fetch 2 candles to ensure we have the last fully closed one
+            ohlcv_breakout = self.exchange_ccxt.fetch_ohlcv(self.trading_pair, timeframe=self.kline_interval_for_breakout, limit=2)
+            if not ohlcv_breakout or len(ohlcv_breakout) < 2:
+                self.logger.warning("Not enough data for breakout signal.")
+                return {"action": "HOLD", "reason": "Insufficient breakout kline data"}
+
+            # Last fully closed candle is the second to last in the list (index -2)
+            # Current forming candle is the last (index -1)
+            last_closed_candle = ohlcv_breakout[-2]
+            last_closed_candle_high = Decimal(str(last_closed_candle[2]))
+            last_closed_candle_low = Decimal(str(last_closed_candle[3]))
+            last_closed_candle_close = Decimal(str(last_closed_candle[4]))
+            last_closed_candle_timestamp_ms = last_closed_candle[0]
+
+            # Avoid trading on the same candle multiple times if signal persists
+            if self.last_trade_candle_timestamp == last_closed_candle_timestamp_ms:
+                self.logger.info(f"Already traded or evaluated candle ending {datetime.fromtimestamp(last_closed_candle_timestamp_ms/1000)}. Waiting for next.")
+                return {"action": "HOLD", "reason": "Already processed this candle"}
+
+        except Exception as e:
+            self.logger.error(f"Error fetching breakout klines: {e}", exc_info=True)
+            return {"action": "ERROR", "reason": "Kline fetch error for breakout"}
+
+        current_position = self._get_current_position_details()
+        action_taken_this_cycle = False
+        trade_result = None
+
+        # Breakout Logic
+        if not current_position:
+            if last_closed_candle_close > self.premarket_high and last_closed_candle_close <= self.max_deviation_high_entry:
+                self.logger.info(f"LONG Breakout detected: Price {last_closed_candle_close} > PM_High {self.premarket_high}")
+                entry_price = last_closed_candle_close # Or current price from ticker if preferred
+                sl_price = entry_price * (Decimal("1") - self.stop_loss_percent)
+                tp_price = entry_price * (Decimal("1") + self.take_profit_percent)
+
+                # Calculate quantity based on notional value allowed for the trade
+                # Qty = Notional / Entry Price
+                if self.target_notional_usdt_for_trade > Decimal("0.0") and entry_price > Decimal("0.0"):
+                    quantity = self.target_notional_usdt_for_trade / entry_price
+                    trade_result = self._place_order_with_sl_tp('long', quantity, entry_price, sl_price, tp_price)
+                    action_taken_this_cycle = True
+                else:
+                    self.logger.warning("Target notional or entry price is zero. Cannot calculate quantity.")
+
+            elif last_closed_candle_close < self.premarket_low and last_closed_candle_close >= self.max_deviation_low_entry:
+                self.logger.info(f"SHORT Breakout detected: Price {last_closed_candle_close} < PM_Low {self.premarket_low}")
+                entry_price = last_closed_candle_close
+                sl_price = entry_price * (Decimal("1") + self.stop_loss_percent)
+                tp_price = entry_price * (Decimal("1") - self.take_profit_percent)
+
+                if self.target_notional_usdt_for_trade > Decimal("0.0") and entry_price > Decimal("0.0"):
+                    quantity = self.target_notional_usdt_for_trade / entry_price
+                    trade_result = self._place_order_with_sl_tp('short', quantity, entry_price, sl_price, tp_price)
+                    action_taken_this_cycle = True
+                else:
+                    self.logger.warning("Target notional or entry price is zero. Cannot calculate quantity.")
+        else: # Position exists, check for SL/TP (handled by exchange) or other exit conditions (e.g. time-based, not implemented here)
+            self.logger.info(f"Position already open: {current_position}. Monitoring SL/TP via exchange.")
+            # Could add logic here to check if SL/TP was hit if exchange doesn't notify, or if a manual close is needed based on new signals.
+            # For this strategy, we typically let SL/TP orders on exchange handle exits unless EOD.
+
+        if action_taken_this_cycle:
+            self.last_trade_candle_timestamp = last_closed_candle_timestamp_ms
+            return trade_result if trade_result else {"action": "ERROR", "reason": "Trade placement failed post-signal"}
+        
+        return {"action": "HOLD", "reason": "No breakout signal or position already exists"}
+
+
+    def run_backtest(self, historical_data_feed, current_simulated_time_utc: datetime):
+        now_est = self._get_current_est_datetime(current_simulated_time_utc)
+        now_est_time = now_est.time()
+        
+        current_price_for_eval_decimal = Decimal(str(historical_data_feed.get_current_price(self.trading_pair, current_simulated_time_utc)))
+
+        # Initialize daily levels
+        if now_est_time >= self.market_open_time and \
+           (self.initialized_for_session_date is None or self.initialized_for_session_date != now_est.date()):
+            if not self._initialize_session_levels(now_est, historical_data_feed):
+                return {"action": "HOLD", "reason": "Backtest: Failed level initialization"}
+        
+        if not self.premarket_high or not self.premarket_low:
+            if now_est_time < self.market_open_time and now_est_time >= self.pre_market_start_time:
+                 self.logger.info(f"[BACKTEST] Pre-market period. Levels not yet finalized. Current EST: {now_est_time}")
+            elif now_est_time >= self.market_open_time:
+                 self.logger.warning(f"[BACKTEST] Market open but pre-market levels are not set. Attempting re-init.")
+                 if not self._initialize_session_levels(now_est, historical_data_feed):
+                      return {"action": "HOLD", "reason": "Backtest: Levels not set post market open"}
+            else:
+                self.logger.info(f"[BACKTEST] Outside trading session hours. Current EST: {now_est_time}")
+            return {"action": "HOLD", "reason": "Backtest: Levels not set or outside trading hours"}
+
+        # EOD Close Logic
+        if now_est_time >= self.trading_session_end_time:
+            return self._eod_close_logic(now_est, current_price_for_eval_decimal, current_simulated_time_utc)
+
+        # Fetch kline data for the breakout interval ending at current_simulated_time_utc
+        # For backtesting, the 'current_simulated_time_utc' represents the END of the most recent kline interval.
+        # We need the close of the candle that *just closed* at current_simulated_time_utc.
+        # So, fetch_ohlcv with end_time = current_simulated_time_utc and limit=1 (or more for context)
+        try:
+            # To get the candle that closed *at or before* current_simulated_time_utc
+            # If kline_interval is 1m, and current_simulated_time_utc is 09:31:00,
+            # we want the candle for 09:30:00 - 09:31:00.
+            # `historical_data_feed.get_ohlcv` should be designed to handle this.
+            # Let's assume it returns candles where timestamp is the *start* of the candle.
+            # We need the candle whose start time is `current_simulated_time_utc - interval_duration`.
+            
+            interval_duration_seconds = self.exchange_ccxt.parse_timeframe(self.kline_interval_for_breakout)
+            # Fetch a few candles to be safe, then select the correct one.
+            # Target end time for fetching is current_simulated_time_utc
+            # Target start time for fetching is current_simulated_time_utc - some buffer
+            buffer_duration = timedelta(minutes=self.exchange_ccxt.parse_timeframe(self.kline_interval_for_breakout) * 5 / 60) # 5 intervals
+            since_utc_ms = int((current_simulated_time_utc - buffer_duration).timestamp() * 1000)
+            
+            ohlcv_breakout = historical_data_feed.get_ohlcv(
+                self.trading_pair,
+                self.kline_interval_for_breakout,
+                since_utc_ms=since_utc_ms,
+                limit=10, # Fetch a few, filter below
+                end_time_utc_ms=int(current_simulated_time_utc.timestamp() * 1000)
+            )
+
+            if not ohlcv_breakout:
+                self.logger.warning("[BACKTEST] No OHLCV data for breakout signal.")
+                return {"action": "HOLD", "reason": "Backtest: Insufficient breakout kline data"}
+
+            # Find the candle that *just closed* relative to current_simulated_time_utc
+            # Candle timestamp is start of period. Interval in seconds.
+            # A candle [t,o,h,l,c,v] is for period t to t + interval_seconds
+            # It closes at t + interval_seconds.
+            # We want the candle where t_start + interval_seconds == current_simulated_time_utc.timestamp()
+            # Or, t_start == current_simulated_time_utc.timestamp() - interval_seconds
+            target_candle_start_timestamp_ms = int((current_simulated_time_utc - timedelta(seconds=interval_duration_seconds)).timestamp() * 1000)
+
+            last_closed_candle = None
+            for candle_data in reversed(ohlcv_breakout): # Check most recent first
+                if candle_data[0] == target_candle_start_timestamp_ms:
+                    last_closed_candle = candle_data
+                    break
+
+            if not last_closed_candle:
+                self.logger.warning(f"[BACKTEST] Could not find the specific kline ending at {current_simulated_time_utc}. Last available: {datetime.fromtimestamp(ohlcv_breakout[-1][0]/1000) if ohlcv_breakout else 'None'}")
+                return {"action": "HOLD", "reason": "Backtest: Specific breakout kline not found"}
+
+            last_closed_candle_high = Decimal(str(last_closed_candle[2]))
+            last_closed_candle_low = Decimal(str(last_closed_candle[3]))
+            last_closed_candle_close = Decimal(str(last_closed_candle[4]))
+            last_closed_candle_timestamp_ms = last_closed_candle[0] # This is start of candle
+
+            # Avoid trading on the same candle (using its start time as identifier)
+            if self.last_trade_candle_timestamp == last_closed_candle_timestamp_ms:
+                return {"action": "HOLD", "reason": "Backtest: Already processed this candle"}
+
+        except Exception as e:
+            self.logger.error(f"[BACKTEST] Error processing breakout klines: {e}", exc_info=True)
+            return {"action": "ERROR", "reason": "Backtest: Kline processing error for breakout"}
+
+        current_position = self._get_current_position_details(historical_data_feed)
+        action_taken_this_cycle = False
+        trade_action = {"action": "HOLD"} # Default
+
+        # Breakout Logic (using last_closed_candle_close as the breakout price)
+        if not current_position:
+            entry_price_for_trade = last_closed_candle_close # Breakout confirmed by this candle's close
+
+            if entry_price_for_trade > self.premarket_high and entry_price_for_trade <= self.max_deviation_high_entry:
+                self.logger.info(f"[BACKTEST] LONG Breakout: Price {entry_price_for_trade} > PM_High {self.premarket_high}")
+                sl_price = entry_price_for_trade * (Decimal("1") - self.stop_loss_percent)
+                tp_price = entry_price_for_trade * (Decimal("1") + self.take_profit_percent)
+                if self.target_notional_usdt_for_trade > Decimal("0.0") and entry_price_for_trade > Decimal("0.0"):
+                    quantity = self.target_notional_usdt_for_trade / entry_price_for_trade
+                    trade_action = self._place_order_with_sl_tp('long', quantity, entry_price_for_trade, sl_price, tp_price, current_simulated_time_utc)
+                    action_taken_this_cycle = True
+                else: self.logger.warning("[BACKTEST] Target notional or entry price zero.")
+
+            elif entry_price_for_trade < self.premarket_low and entry_price_for_trade >= self.max_deviation_low_entry:
+                self.logger.info(f"[BACKTEST] SHORT Breakout: Price {entry_price_for_trade} < PM_Low {self.premarket_low}")
+                sl_price = entry_price_for_trade * (Decimal("1") + self.stop_loss_percent)
+                tp_price = entry_price_for_trade * (Decimal("1") - self.take_profit_percent)
+                if self.target_notional_usdt_for_trade > Decimal("0.0") and entry_price_for_trade > Decimal("0.0"):
+                    quantity = self.target_notional_usdt_for_trade / entry_price_for_trade
+                    trade_action = self._place_order_with_sl_tp('short', quantity, entry_price_for_trade, sl_price, tp_price, current_simulated_time_utc)
+                    action_taken_this_cycle = True
+                else: self.logger.warning("[BACKTEST] Target notional or entry price zero.")
+        else:
+            self.logger.info(f"[BACKTEST] Position already open: {current_position}. SL/TP handled by backtest engine based on subsequent price moves.")
+            # Backtest engine should simulate SL/TP hits based on future klines for `current_price_for_eval_decimal`
+
+        if action_taken_this_cycle:
+            self.last_trade_candle_timestamp = last_closed_candle_timestamp_ms # Mark this candle's start time
+
+        return trade_action
