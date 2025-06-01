@@ -12,6 +12,7 @@ from backend.models import Strategy as StrategyModel, UserStrategySubscription, 
 from backend.config import settings
 from backend.services import live_trading_service 
 from backend.utils import _load_strategy_class_from_db_obj # Import from utils
+from backend.schemas.strategy_schemas import PaymentOption
 from typing import Optional, List, Dict, Any
 
 # Initialize logger
@@ -74,6 +75,23 @@ def get_strategy_details(db_session: Session, strategy_db_id: int) -> Dict[str, 
         logger.error(f"Error getting parameter definition for strategy '{strategy_db_obj.name}': {e}", exc_info=True)
         params_def = {"error": f"Could not load parameter definitions: {str(e)}"}
 
+    payment_options_data = []
+    if strategy_db_obj.payment_options_json:
+        try:
+            options_list = json.loads(strategy_db_obj.payment_options_json)
+            if isinstance(options_list, list):
+                for option_dict in options_list:
+                    # Ensure keys match PaymentOption model fields
+                    # Pydantic will validate types
+                    payment_options_data.append(PaymentOption(**option_dict))
+            else:
+                logger.warning(f"payment_options_json for strategy {strategy_db_obj.id} is not a list.")
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON in payment_options_json for strategy {strategy_db_obj.id}.", exc_info=True)
+        except Exception as e: # Catch errors during Pydantic model instantiation
+            logger.error(f"Error processing payment_options_json for strategy {strategy_db_obj.id}: {e}", exc_info=True)
+
+
     details = {
         "id": strategy_db_obj.id, 
         "name": strategy_db_obj.name, 
@@ -82,7 +100,8 @@ def get_strategy_details(db_session: Session, strategy_db_id: int) -> Dict[str, 
         "risk_level": strategy_db_obj.risk_level,
         "python_code_path": strategy_db_obj.python_code_path, # Include for admin/debug
         "parameters_definition": params_def, 
-        "default_parameters_db": json.loads(strategy_db_obj.default_parameters) if strategy_db_obj.default_parameters else {}
+        "default_parameters_db": json.loads(strategy_db_obj.default_parameters) if strategy_db_obj.default_parameters else {},
+        "payment_options": payment_options_data
     }
     logger.info(f"Fetched details for strategy ID {strategy_db_id}: {strategy_db_obj.name}.")
     return {"status": "success", "details": details}

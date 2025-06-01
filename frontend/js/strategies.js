@@ -147,6 +147,58 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                      modalStrategyParamsContainer.innerHTML = '<p><em>This strategy has no customizable parameters.</em></p>';
                 }
+
+                // --- Payment Options ---
+                let paymentOptionsContainer = document.getElementById('modalPaymentOptionsContainer');
+                if (!paymentOptionsContainer && strategyCustomizationForm) { // Ensure form exists
+                    paymentOptionsContainer = document.createElement('div');
+                    paymentOptionsContainer.id = 'modalPaymentOptionsContainer';
+                    paymentOptionsContainer.className = 'form-group'; // Standard styling
+                    // Insert before API key selection or at a sensible place
+                    const apiKeySelectDiv = modalApiKeySelect ? modalApiKeySelect.closest('.form-group') : null;
+                    if (apiKeySelectDiv) {
+                        strategyCustomizationForm.insertBefore(paymentOptionsContainer, apiKeySelectDiv);
+                    } else {
+                         // Fallback: append to params container or form if API key select not found
+                        modalStrategyParamsContainer.parentNode.insertBefore(paymentOptionsContainer, modalStrategyParamsContainer.nextSibling);
+                    }
+                }
+
+                if (paymentOptionsContainer) { // Check if container exists or was created
+                    paymentOptionsContainer.innerHTML = ''; // Clear previous options
+                    if (currentStrategyData.payment_options && currentStrategyData.payment_options.length > 0) {
+                        const heading = document.createElement('label'); // Use label as it's common for form sections
+                        heading.textContent = 'Subscription Options:';
+                        paymentOptionsContainer.appendChild(heading);
+
+                        currentStrategyData.payment_options.forEach((option, index) => {
+                            const optionDiv = document.createElement('div');
+                            optionDiv.className = 'payment-option-item'; // For styling individual options
+
+                            const radioInput = document.createElement('input');
+                            radioInput.type = 'radio';
+                            radioInput.name = 'payment_option';
+                            radioInput.id = `payment_option_${index}`;
+                            radioInput.value = JSON.stringify(option);
+                            if (index === 0) {
+                                radioInput.checked = true; // Select first option by default
+                            }
+
+                            const radioLabel = document.createElement('label');
+                            radioLabel.setAttribute('for', `payment_option_${index}`);
+                            radioLabel.textContent = ` ${option.description || option.months + ' Month(s)'} - $${option.price_usd.toFixed(2)}`;
+
+                            optionDiv.appendChild(radioInput);
+                            optionDiv.appendChild(radioLabel);
+                            paymentOptionsContainer.appendChild(optionDiv);
+                        });
+                    } else {
+                        paymentOptionsContainer.innerHTML = '<p><em>No subscription options currently available for this strategy.</em></p>';
+                        if (subscribeButton) subscribeButton.disabled = true; // Disable subscribe if no payment options
+                    }
+                }
+                // --- End Payment Options ---
+
                 fetchUserApiKeys(); // Fetch API keys after strategy details are loaded
             } else {
                 throw new Error(data.message || "Could not load strategy details.");
@@ -202,11 +254,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 alert("Please select an API Key for this strategy subscription."); return;
             }
 
-            // Assuming a fixed price or getting it from strategy data/UI
-            const amountUsd = 10.00; // Example price - replace with actual logic
-            const subscriptionMonths = 1; // Example duration - replace with actual logic
+            // --- Get selected payment option ---
+            const selectedPaymentOptionRadio = document.querySelector('input[name="payment_option"]:checked');
+            if (!selectedPaymentOptionRadio) {
+                alert("Please select a subscription option.");
+                if (subscribeButton) subscribeButton.disabled = false; // Re-enable button
+                return;
+            }
+            const selectedPaymentOption = JSON.parse(selectedPaymentOptionRadio.value);
+            const amountUsd = selectedPaymentOption.price_usd;
+            const subscriptionMonths = selectedPaymentOption.months;
+            const paymentDescription = selectedPaymentOption.description || `${subscriptionMonths} Month(s) Access for ${currentStrategyData.name}`;
+            // --- End Get selected payment option ---
 
-            console.log("Attempting to initiate payment for strategy:", currentStrategyData.id, "with params:", customParameters, "on API Key:", apiKeyId);
+            console.log("Attempting to initiate payment for strategy:", currentStrategyData.id, "with params:", customParameters, "on API Key:", apiKeyId, "Option:", selectedPaymentOption);
 
             // --- Initiate Payment ---
             try {
@@ -217,9 +278,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         item_id: currentStrategyData.id, // Strategy DB ID
                         item_type: "new_strategy_subscription",
                         item_name: currentStrategyData.name,
-                        item_description: `Subscription for ${subscriptionMonths} month(s)`,
-                        amount_usd: amountUsd,
-                        subscription_months: subscriptionMonths,
+                        item_description: paymentDescription, // Use dynamic description
+                        amount_usd: amountUsd, // Use dynamic amount
+                        subscription_months: subscriptionMonths, // Use dynamic months
                         // Include necessary metadata for the webhook to activate the subscription
                         metadata: {
                             user_id: userId, // Pass user_id in metadata

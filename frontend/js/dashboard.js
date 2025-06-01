@@ -36,6 +36,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const updateProfileBtn = document.getElementById('updateProfileBtn');
     const changePasswordBtn = document.getElementById('changePasswordBtn');
 
+    // Profile Update Modal Elements
+    const updateProfileModal = document.getElementById('updateProfileModal');
+    const closeUpdateProfileModalBtn = document.getElementById('closeUpdateProfileModalBtn');
+    const updateProfileForm = document.getElementById('updateProfileForm');
+    const profileFullNameInput = document.getElementById('profileFullName'); // Renamed to avoid conflict
+    const profileBioInput = document.getElementById('profileBio'); // Renamed to avoid conflict
+
+    // Change Password Modal Elements
+    const changePasswordModal = document.getElementById('changePasswordModal');
+    const closeChangePasswordModalBtn = document.getElementById('closeChangePasswordModalBtn');
+    const changePasswordForm = document.getElementById('changePasswordForm');
+
+    let currentUserProfileData = null; // To store current profile details
+
     // Logout button is handled by auth.js if it's included on the page and targets the same ID.
     // If auth.js is not on dashboard.html, or if sidebar logout is specific, keep this:
     // const logoutButtonSidebar = document.getElementById('logoutButtonSidebar');
@@ -71,6 +85,12 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.status === "success") {
                 if (dashUsername) dashUsername.textContent = data.username || "N/A";
                 if (dashEmail) dashEmail.textContent = data.email || "N/A";
+                // Store for modal prepopulation
+                currentUserProfileData = {
+                    full_name: data.full_name || '',
+                    bio: data.bio || '',
+                    email: data.email || '' // Keep email for reference, though not editing it
+                };
             } else { throw new Error(data.message || "Failed to parse profile."); }
         } catch (error) {
             console.error("Error fetching user profile:", error);
@@ -275,10 +295,138 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (updateProfileBtn) {
-        updateProfileBtn.addEventListener('click', () => alert("Update Profile (to be implemented)."));
+        updateProfileBtn.addEventListener('click', (event) => {
+            event.preventDefault(); // If it's a link or button in a form
+            if (currentUserProfileData && profileFullNameInput && profileBioInput && updateProfileModal) {
+                profileFullNameInput.value = currentUserProfileData.full_name;
+                profileBioInput.value = currentUserProfileData.bio;
+                updateProfileModal.style.display = 'block';
+            } else {
+                alert("Profile data not loaded yet. Please wait or refresh.");
+                fetchUserProfile(); // Attempt to re-fetch if data is missing
+            }
+        });
     }
-    if (changePasswordBtn) {
-        changePasswordBtn.addEventListener('click', () => alert("Change Password (to be implemented)."));
+
+    if (closeUpdateProfileModalBtn && updateProfileModal) {
+        closeUpdateProfileModalBtn.onclick = () => {
+            updateProfileModal.style.display = 'none';
+        };
+    }
+
+    if (updateProfileForm && updateProfileModal) {
+        updateProfileForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const fullName = profileFullNameInput.value.trim();
+            const bio = profileBioInput.value.trim();
+
+            const updateData = {
+                full_name: fullName,
+                bio: bio
+            };
+            // Example if email was editable and changed:
+            // if (profileEmailInput.value.trim() !== currentUserProfileData.email) {
+            //     updateData.email = profileEmailInput.value.trim();
+            // }
+
+            try {
+                const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/auth/users/me`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify(updateData)
+                });
+
+                const result = await response.json();
+                if (response.ok && result.status === "success") {
+                    alert("Profile updated successfully!");
+                    updateProfileModal.style.display = 'none';
+                    fetchUserProfile(); // Refresh profile display on dashboard
+                } else {
+                    alert("Failed to update profile: " + (result.detail || result.message || "Unknown error."));
+                }
+            } catch (error) {
+                console.error("Error updating profile:", error);
+                alert("An error occurred while updating profile: " + error.message);
+            }
+        });
+    }
+
+    // Window click to close modal
+    if (updateProfileModal || changePasswordModal) {
+        window.onclick = function(event) {
+            if (updateProfileModal && event.target == updateProfileModal) {
+                updateProfileModal.style.display = "none";
+            }
+            if (changePasswordModal && event.target == changePasswordModal) {
+                changePasswordModal.style.display = "none";
+                if (changePasswordForm) changePasswordForm.reset(); // Clear form
+            }
+        }
+    }
+
+    if (changePasswordBtn && changePasswordModal && changePasswordForm) {
+        changePasswordBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            changePasswordForm.reset(); // Clear previous values
+            changePasswordModal.style.display = 'block';
+        });
+    }
+
+    if (closeChangePasswordModalBtn && changePasswordModal && changePasswordForm) {
+        closeChangePasswordModalBtn.onclick = () => {
+            changePasswordModal.style.display = 'none';
+            changePasswordForm.reset(); // Clear form
+        };
+    }
+
+    if (changePasswordForm && changePasswordModal) {
+        changePasswordForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            const oldPassword = document.getElementById('oldPassword').value;
+            const newPassword = document.getElementById('newPassword').value;
+            const confirmNewPassword = document.getElementById('confirmNewPassword').value;
+
+            if (newPassword.length < 8) {
+                alert("New password must be at least 8 characters long.");
+                return;
+            }
+            if (newPassword !== confirmNewPassword) {
+                alert("New passwords do not match.");
+                return;
+            }
+
+            const passwordData = {
+                old_password: oldPassword,
+                new_password: newPassword
+            };
+
+            try {
+                const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/auth/users/me/password`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify(passwordData)
+                });
+
+                const result = await response.json();
+                if (response.ok && result.status === "success") {
+                    alert("Password updated successfully!");
+                    changePasswordForm.reset();
+                    changePasswordModal.style.display = 'none';
+                } else {
+                    alert("Failed to update password: " + (result.detail || result.message || "Unknown error. Check old password."));
+                }
+            } catch (error) {
+                console.error("Error updating password:", error);
+                alert("An error occurred while updating password: " + error.message);
+            }
+        });
     }
 
     initializeDashboard();
