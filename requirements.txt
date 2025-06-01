@@ -1,0 +1,22 @@
+sqlalchemy
+werkzeug
+python-jose[cryptography]
+passlib[bcrypt]
+fastapi
+uvicorn[standard]
+python-multipart
+psycopg2-binary
+ccxt
+coinbase-commerce
+# Add other specific dependencies as they are identified, e.g., for exchange APIs:
+# python-binance
+pydantic[email]
+cryptography
+
+celery
+redis
+gunicorn
+pytest
+alembic
+gevent
+pandas

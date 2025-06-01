@@ -1,0 +1,130 @@
+version: '3.8'
+
+# Production Docker Compose Configuration
+# This file is intended for production or production-like staging environments.
+# Key differences from docker-compose.yml:
+# - No source code volume mounts; uses code baked into Docker images.
+# - Relies on environment variables being injected by the deployment platform or CI/CD system.
+# - Secrets (API keys, JWT secret) must be provided as environment variables.
+# - Gunicorn is used for the web service.
+# - Celery workers can be scaled using the `deploy` section (for Docker Swarm).
+# - Database/Redis ports are not exposed externally by default.
+
+# CRITICAL: All environment variables marked with `${VARIABLE_NAME}` or "YOUR_PRODUCTION_VALUE_HERE"
+# MUST be set in your deployment environment. Do NOT hardcode production secrets here.
+# Consider using a secrets management tool integrated with your deployment platform.
+
+services:
+  db:
+    image: postgres:13-alpine
+    # container_name removed to allow Docker to name, better for scaling
+    environment:
+      # These are typically set during the first run or by the deployment platform.
+      # Ensure these are securely managed.
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-trading_platform}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data/
+    # Ports are removed for production; DB should ideally not be exposed to the public internet.
+    # Access should be through the internal Docker network or a secure connection if remote.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-trading_platform}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:6-alpine
+    # container_name removed
+    volumes:
+      - redis_data_prod:/data
+    # Ports are removed for production; Redis should be accessed over the internal Docker network.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.web
+    # container_name removed
+    # No env_file; environment variables must be provided externally.
+    # No volumes mapping source code; uses code from the Docker image.
+    command: sh -c "alembic upgrade head && gunicorn -k uvicorn.workers.UvicornWorker -c /app/gunicorn_conf.py main:app"
+    ports:
+      # Binds to 127.0.0.1 on the host, assuming a reverse proxy like Nginx will front the application.
+      # Change to "0.0.0.0:8000:8000" or your specific IP if direct external access is needed (not recommended).
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # CRITICAL: Provide these via your deployment environment's secrets management.
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-trading_platform}"
+      REDIS_URL: "redis://redis:6379/0"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}" # Must be set in production
+      API_ENCRYPTION_KEY: "${API_ENCRYPTION_KEY}" # Must be set in production
+      FRONTEND_URL: "${FRONTEND_URL:-http://localhost}" # Adjust to your production frontend URL
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS}" # e.g. "https://yourdomain.com,https://www.yourdomain.com"
+      STRATEGIES_DIR: "/app/strategies" # Or a path to a mounted volume if strategies are managed outside the image
+      GUNICORN_WORKERS: "${GUNICORN_WORKERS:-4}"
+      ENVIRONMENT: "production" # Explicitly set environment to production
+      # SMTP settings for email notifications (ensure these are set for production functionality)
+      SMTP_TLS: "${SMTP_TLS:-true}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_HOST: "${SMTP_HOST}" # e.g., smtp.mailgun.org
+      SMTP_USER: "${SMTP_USER}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      EMAILS_FROM_EMAIL: "${EMAILS_FROM_EMAIL}" # e.g., no-reply@yourdomain.com
+      EMAILS_FROM_NAME: "${EMAILS_FROM_NAME:-Trading Platform}"
+      COINBASE_COMMERCE_API_KEY: "${COINBASE_COMMERCE_API_KEY}"
+      COINBASE_COMMERCE_WEBHOOK_SECRET: "${COINBASE_COMMERCE_WEBHOOK_SECRET}"
+      APP_PAYMENT_SUCCESS_URL: "${APP_PAYMENT_SUCCESS_URL}"
+      APP_PAYMENT_CANCEL_URL: "${APP_PAYMENT_CANCEL_URL}"
+
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    # container_name removed
+    # No env_file; environment variables must be provided externally.
+    # No volumes mapping source code; uses code from the Docker image.
+    # Command is taken from Dockerfile.worker, which uses CELERY_CONCURRENCY.
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # CRITICAL: Provide these via your deployment environment's secrets management.
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-trading_platform}"
+      REDIS_URL: "redis://redis:6379/0"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}" # Must be set in production
+      API_ENCRYPTION_KEY: "${API_ENCRYPTION_KEY}" # Must be set in production
+      STRATEGIES_DIR: "/app/strategies" # Match web service or use mounted volume
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-8}" # Concurrency per worker replica
+      ENVIRONMENT: "production" # Explicitly set environment to production
+      # SMTP settings (if worker sends emails directly)
+      SMTP_TLS: "${SMTP_TLS:-true}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_HOST: "${SMTP_HOST}"
+      SMTP_USER: "${SMTP_USER}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      EMAILS_FROM_EMAIL: "${EMAILS_FROM_EMAIL}"
+      EMAILS_FROM_NAME: "${EMAILS_FROM_NAME:-Trading Platform}"
+      COINBASE_COMMERCE_API_KEY: "${COINBASE_COMMERCE_API_KEY}" # If tasks interact with payments
+      # Note: API_ENCRYPTION_KEY is also needed by worker if it handles sensitive data.
+    deploy:
+      # Example: Scale Celery workers in Docker Swarm mode.
+      # The number of replicas can be an environment variable for flexibility.
+      replicas: ${CELERY_WORKER_REPLICAS:-2}
+
+volumes:
+  postgres_data_prod: # Separate volume for production data
+  redis_data_prod:    # Separate volume for production data

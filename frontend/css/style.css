@@ -1,0 +1,588 @@
+/* trading_platform/frontend/css/style.css */
+
+/* Global Resets & Base Styles */
+:root {
+    --primary-color: #007bff; /* A common blue, adjust to match 3Commas teal/blue */
+    --secondary-color: #17a2b8; /* Teal/info color */
+    --light-gray: #f8f9fa;
+    --medium-gray: #e9ecef;
+    --dark-gray: #6c757d;
+    --text-color: #333;
+    --text-color-light: #fff;
+    --background-color: #fff; /* Main content background */
+    --sidebar-background: #2c3e50; /* Dark sidebar like 3Commas */
+    --card-background: #fff;
+    --border-color: #dee2e6;
+    --success-color: #28a745;
+    --danger-color: #dc3545;
+    --font-family: 'Roboto', 'Segoe UI', Arial, sans-serif; /* Modern sans-serif */
+
+    /* Dark Mode Variables */
+    --dm-primary-color: #0d6efd; /* Example: can be same as light or adjusted */
+    --dm-secondary-color: #17a2b8;
+    --dm-background-color: #121212; /* Common dark bg */
+    --dm-surface-color: #1e1e1e; /* For cards, sidebars, modals */
+    --dm-text-color: #e0e0e0;
+    --dm-text-color-muted: #a0a0a0;
+    --dm-border-color: #333333; 
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font-family);
+    background-color: var(--light-gray); 
+    color: var(--text-color);
+    line-height: 1.6;
+    display: flex; 
+    min-height: 100vh;
+    transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out;
+}
+
+body.dark-mode {
+    background-color: var(--dm-background-color);
+    color: var(--dm-text-color);
+}
+
+.app-container {
+    display: flex;
+    width: 100%;
+}
+
+/* Sidebar Navigation */
+.sidebar {
+    width: 250px;
+    background-color: var(--sidebar-background);
+    color: var(--text-color-light);
+    padding: 20px 0;
+    height: 100vh; /* Full height */
+    position: fixed; /* Fixed sidebar */
+    top: 0;
+    left: 0;
+    overflow-y: auto;
+}
+
+.sidebar .logo {
+    text-align: center;
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #44586d; /* Slightly lighter border */
+}
+
+.sidebar .logo h1 {
+    font-size: 1.8em;
+    color: var(--text-color-light);
+    margin:0;
+}
+
+.sidebar nav ul {
+    list-style-type: none;
+}
+
+.sidebar nav ul li a {
+    display: block;
+    color: #bdc3c7; /* Lighter text for links */
+    padding: 12px 20px;
+    text-decoration: none;
+    font-size: 0.95em;
+    transition: background-color 0.3s, color 0.3s;
+}
+
+.sidebar nav ul li a:hover,
+.sidebar nav ul li a.active {
+    background-color: #34495e; /* Slightly darker on hover/active */
+    color: var(--text-color-light);
+    border-left: 3px solid var(--primary-color);
+    padding-left: 17px;
+}
+
+.sidebar nav h4 { /* For section titles like "TRADING BOTS" */
+    padding: 15px 20px 5px;
+    color: #7f8c8d; /* Muted color for titles */
+    font-size: 0.8em;
+    text-transform: uppercase;
+    font-weight: bold;
+}
+
+
+/* Main Content Area */
+.main-content {
+    flex-grow: 1;
+    padding: 25px;
+    margin-left: 250px; /* Offset by sidebar width */
+    background-color: var(--background-color);
+    overflow-y: auto; /* Allow scrolling for content */
+}
+
+header.page-header { /* For headers within main-content */
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 25px;
+    padding-bottom: 15px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+header.page-header h1, header.page-header h2 {
+    margin: 0;
+    font-size: 1.8em;
+    color: var(--text-color);
+}
+
+/* Common Elements: Buttons, Forms, Cards */
+button, .btn {
+    background-color: var(--primary-color);
+    color: white;
+    padding: 10px 18px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.95em;
+    transition: background-color 0.3s;
+    text-decoration: none; /* For .btn used on <a> tags */
+    display: inline-block;
+}
+
+button:hover, .btn:hover {
+    background-color: #0056b3; /* Darker shade of primary */
+}
+
+button.btn-secondary, .btn.btn-secondary {
+    background-color: var(--secondary-color);
+}
+button.btn-secondary:hover, .btn.btn-secondary:hover {
+    background-color: #117a8b; /* Darker teal */
+}
+
+button.btn-danger, .btn.btn-danger {
+    background-color: var(--danger-color);
+}
+button.btn-danger:hover, .btn.btn-danger:hover {
+    background-color: #c82333; /* Darker red */
+}
+
+button.btn-outline, .btn.btn-outline {
+    background-color: transparent;
+    color: var(--primary-color);
+    border: 1px solid var(--primary-color);
+}
+button.btn-outline:hover, .btn.btn-outline:hover {
+    background-color: var(--primary-color);
+    color: white;
+}
+
+
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="datetime-local"],
+select,
+textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 0.95em;
+    margin-bottom: 10px; /* Default spacing */
+    box-sizing: border-box;
+}
+
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25);
+}
+
+label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+.form-group {
+    margin-bottom: 1.2rem;
+}
+
+.card {
+    background-color: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.card-header {
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+    border-bottom: 1px solid var(--border-color);
+}
+.card-header h3, .card-header h2 { margin-top:0; }
+
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+th, td {
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    text-align: left;
+    font-size: 0.9em;
+}
+th {
+    background-color: var(--light-gray);
+    font-weight: bold;
+}
+tbody tr:nth-child(even) {
+    background-color: #fdfdfd;
+}
+
+/* Modals (Basic Styling - can be enhanced) */
+.modal {
+    display: none; 
+    position: fixed; 
+    z-index: 1000; 
+    left: 0;
+    top: 0;
+    width: 100%; 
+    height: 100%; 
+    overflow: auto; 
+    background-color: rgba(0,0,0,0.5); 
+}
+.modal-content {
+    background-color: #fff;
+    margin: 10% auto;
+    padding: 25px;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    width: 60%;
+    max-width: 700px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    position: relative;
+}
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 15px;
+}
+.modal-header h2 { margin: 0; }
+.close-btn {
+    color: #aaa;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding:0;
+}
+.close-btn:hover, .close-btn:focus { color: #333; }
+
+
+/* Utility Classes */
+.text-center { text-align: center; }
+.mt-1 { margin-top: 0.5rem; }
+.mt-2 { margin-top: 1rem; }
+.mb-1 { margin-bottom: 0.5rem; }
+.mb-2 { margin-bottom: 1rem; }
+.p-1 { padding: 0.5rem; }
+.p-2 { padding: 1rem; }
+.error-message { color: var(--danger-color); font-size: 0.9em; }
+.success-message { color: var(--success-color); font-size: 0.9em; }
+
+
+/* Specific Page Styles from previous files (can be integrated or overridden) */
+/* Example: Dashboard specific styles from dashboard.html (if any) */
+/* #dashboard section { ... } */
+
+/* Example: Strategy card from strategies.html */
+.strategy-card { /* Already defined as .card, can be specialized */
+    /* Add specific styles if needed, or use .card */
+}
+.strategy-card .details-btn, .strategy-card .subscribe-btn {
+    margin-top: 10px;
+    margin-right: 5px;
+}
+
+/* Example: Backtesting page styles */
+.backtest-form-container, .backtest-results-container {
+    /* Use .card styling or customize */
+}
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 20px; /* Increased gap */
+}
+#priceChartContainer, #equityChartContainer {
+    width: 100%;
+    height: 400px; 
+    margin-bottom: 20px;
+    border: 1px solid var(--border-color);
+}
+.metrics-summary { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom:15px;}
+.metric-item { background-color: var(--light-gray); padding:12px; border-radius:4px; border: 1px solid var(--medium-gray); }
+.metric-item strong { display:block; font-size:0.85em; color:var(--dark-gray); margin-bottom: 3px; text-transform: uppercase;}
+
+
+/* Login/Register Page Specific (No sidebar) */
+body.auth-page {
+    display: block; /* Override flex for auth pages */
+    background-color: var(--light-gray);
+}
+.auth-container {
+    width: 100%;
+    max-width: 450px;
+    margin: 5% auto;
+    padding: 30px;
+    background-color: #fff;
+    border-radius: 5px;
+    box-shadow: 0 0 15px rgba(0,0,0,0.1);
+}
+.auth-container h1 {
+    text-align: center;
+    margin-bottom: 25px;
+    color: var(--primary-color);
+}
+.auth-container .form-group a {
+    font-size: 0.9em;
+    color: var(--primary-color);
+    text-decoration: none;
+}
+.auth-container .form-group a:hover {
+    text-decoration: underline;
+}
+.auth-container p {
+    text-align: center;
+    margin-top: 15px;
+    font-size: 0.9em;
+}
+
+/* Ensure footer is at the bottom for non-flex auth pages */
+.auth-page footer {
+    text-align: center;
+    padding: 20px;
+    color: var(--dark-gray);
+    margin-top: 30px;
+}
+
+/* Dark Mode Specific Overrides */
+body.dark-mode .sidebar {
+    background-color: var(--dm-surface-color); /* Slightly lighter than main dark bg */
+    color: var(--dm-text-color);
+    border-right: 1px solid var(--dm-border-color);
+}
+body.dark-mode .sidebar .logo {
+    border-bottom-color: var(--dm-border-color);
+}
+body.dark-mode .sidebar .logo h1 {
+    color: var(--dm-text-color);
+}
+body.dark-mode .sidebar nav ul li a {
+    color: var(--dm-text-color-muted);
+}
+body.dark-mode .sidebar nav ul li a:hover,
+body.dark-mode .sidebar nav ul li a.active {
+    background-color: rgba(255,255,255,0.05); /* Subtle highlight */
+    color: var(--dm-text-color);
+    border-left-color: var(--dm-primary-color);
+}
+body.dark-mode .sidebar nav h4 {
+    color: var(--dm-text-color-muted);
+    opacity: 0.7;
+}
+
+body.dark-mode .main-content {
+    background-color: var(--dm-background-color);
+}
+body.dark-mode header.page-header {
+    border-bottom-color: var(--dm-border-color);
+}
+body.dark-mode header.page-header h1, 
+body.dark-mode header.page-header h2 {
+    color: var(--dm-text-color);
+}
+
+body.dark-mode button, body.dark-mode .btn {
+    /* Keep primary buttons as they are or adjust if needed */
+    /* background-color: var(--dm-primary-color); */
+    /* color: var(--dm-text-color-light); */
+}
+body.dark-mode button.btn-outline, body.dark-mode .btn.btn-outline {
+    color: var(--dm-primary-color);
+    border-color: var(--dm-primary-color);
+}
+body.dark-mode button.btn-outline:hover, body.dark-mode .btn.btn-outline:hover {
+    background-color: var(--dm-primary-color);
+    color: var(--dm-text-color); /* Ensure contrast */
+}
+
+
+body.dark-mode input[type="text"],
+body.dark-mode input[type="email"],
+body.dark-mode input[type="password"],
+body.dark-mode input[type="number"],
+body.dark-mode input[type="datetime-local"],
+body.dark-mode select,
+body.dark-mode textarea {
+    background-color: var(--dm-surface-color);
+    color: var(--dm-text-color);
+    border-color: var(--dm-border-color);
+}
+body.dark-mode input::placeholder, 
+body.dark-mode textarea::placeholder {
+    color: var(--dm-text-color-muted);
+}
+body.dark-mode input:focus, 
+body.dark-mode select:focus, 
+body.dark-mode textarea:focus {
+    border-color: var(--dm-primary-color);
+    box-shadow: 0 0 0 0.2rem rgba(var(--dm-primary-color-rgb, 13, 110, 253),.25); /* Assuming primary color is blueish */
+}
+body.dark-mode label {
+    color: var(--dm-text-color-muted);
+}
+
+body.dark-mode .card {
+    background-color: var(--dm-surface-color);
+    border-color: var(--dm-border-color);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2); /* Darker shadow */
+}
+body.dark-mode .card-header {
+    border-bottom-color: var(--dm-border-color);
+}
+body.dark-mode .card-header h3, body.dark-mode .card-header h2 {
+     color: var(--dm-text-color);
+}
+
+
+body.dark-mode table {
+    /* Table styles might need more specific overrides for text and background */
+}
+body.dark-mode th, body.dark-mode td {
+    border-color: var(--dm-border-color);
+}
+body.dark-mode th {
+    background-color: #2d3748; /* Slightly darker than card surface */
+    color: var(--dm-text-color);
+}
+body.dark-mode tbody tr:nth-child(even) {
+    background-color: rgba(255,255,255,0.03); /* Very subtle difference for even rows */
+}
+
+body.dark-mode .modal-content {
+    background-color: var(--dm-surface-color);
+    border-color: var(--dm-border-color);
+}
+body.dark-mode .modal-header {
+    border-bottom-color: var(--dm-border-color);
+}
+body.dark-mode .modal-header h2 { color: var(--dm-text-color); }
+body.dark-mode .close-btn {
+    color: var(--dm-text-color-muted);
+}
+body.dark-mode .close-btn:hover, body.dark-mode .close-btn:focus { color: var(--dm-text-color); }
+
+body.dark-mode .metric-item { 
+    background-color: var(--dm-background-color); /* Match main dark bg or slightly lighter */
+    border-color: var(--dm-border-color); 
+}
+body.dark-mode .metric-item strong { 
+    color: var(--dm-text-color-muted);
+}
+
+/* Dark mode for auth pages */
+body.dark-mode.auth-page {
+    background-color: var(--dm-background-color);
+}
+body.dark-mode .auth-container {
+    background-color: var(--dm-surface-color);
+    box-shadow: 0 0 20px rgba(0,0,0,0.3);
+}
+body.dark-mode .auth-container h1 {
+    color: var(--dm-primary-color);
+}
+body.dark-mode .auth-container .form-group a {
+    color: var(--dm-primary-color);
+}
+body.dark-mode .auth-page footer {
+    color: var(--dm-text-color-muted);
+}
+
+/* Dark mode for chart placeholders if needed */
+body.dark-mode #priceChartContainer, 
+body.dark-mode #equityChartContainer {
+    border-color: var(--dm-border-color);
+    /* Chart libraries usually have their own theme options for dark mode */
+}
+
+/* Dark Mode Toggle Switch */
+.theme-switch-wrapper {
+    display: flex;
+    align-items: center;
+    margin: 15px 20px; /* Position in sidebar */
+}
+.theme-switch-label {
+    margin-right: 10px;
+    font-size: 0.9em;
+    color: var(--dm-text-color-muted); /* Default to light text as it's in dark sidebar */
+}
+body.dark-mode .theme-switch-label { /* Ensure it's visible in light mode sidebar if sidebar bg changes */
+    /* color: var(--text-color); */ /* This depends on final sidebar light mode color */
+}
+
+.theme-switch {
+    display: inline-block;
+    height: 20px;
+    position: relative;
+    width: 40px;
+}
+
+.theme-switch input {
+    display:none;
+}
+
+.slider {
+    background-color: #ccc;
+    bottom: 0;
+    cursor: pointer;
+    left: 0;
+    position: absolute;
+    right: 0;
+    top: 0;
+    transition: .4s;
+    border-radius: 20px;
+}
+
+.slider:before {
+    background-color: #fff;
+    bottom: 2px;
+    content: "";
+    height: 16px;
+    left: 2px;
+    position: absolute;
+    transition: .4s;
+    width: 16px;
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background-color: var(--primary-color);
+}
+body.dark-mode input:checked + .slider {
+    background-color: var(--dm-primary-color);
+}
+
+input:checked + .slider:before {
+    transform: translateX(20px);
+}
