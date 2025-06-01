@@ -238,4 +238,4 @@ docker-compose -f docker-compose.prod.yml up -d
     6.  If frontend files changed, re-sync them to `/var/www/yourdomain.com/html/`.
 *   **Security Updates:** Regularly update your VPS packages (`sudo apt update && sudo apt upgrade`), Docker, and Docker Compose.
 
-This guide provides a foundational setup. For long-term production use, refer to the `PRODUCTION_CHECKLIST.MD` for further enhancements regarding security, monitoring, backups, and scalability.
+This guide provides a foundational setup. For long-term production use, refer to the `PRODUCTION_CHECKLIST.MD` for further enhancements regarding security, monitoring, backups, and scalability. 
