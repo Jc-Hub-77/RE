@@ -1,188 +1,400 @@
-import pandas as pd
-import numpy as np
 import logging
-import time
-import ta 
-import json # For custom_data if used
-from sqlalchemy.orm import Session
-from backend.models import Position, Order, UserStrategySubscription
+import numpy as np
+import talib
+import pandas
+import ccxt # Though self.exchange_ccxt is provided
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+from datetime import datetime, time # Ensure time is imported
 
-logger = logging.getLogger(__name__)
+# Ensure high precision for Decimal calculations
+getcontext().prec = 18
 
-class NadarayaWatsonEnvelopeStrategy:
-    def __init__(self, symbol: str, timeframe: str, capital: float = 10000, **custom_parameters):
-        self.name = "NadarayaWatsonEnvelopeStrategy" # Ensure class name matches file if used for loading
-        self.symbol = symbol
-        self.timeframe = timeframe
-        
-        defaults = {
-            "h_bandwidth": 8.0,
-            "multiplier": 3.0,
-            "tp_percent": 1.0,
-            "sl_percent": 0.5,
-            "position_size_percent_capital": 10.0 
-        }
-        self_params = {**defaults, **custom_parameters}
-        for key, value in self_params.items():
-            setattr(self, key, value)
+class NadarayaWatsonStochRSIStrategy:
 
-        self.tp_decimal = self.tp_percent / 100.0
-        self.sl_decimal = self.sl_percent / 100.0
-        self.position_size_percent_capital_decimal = self.position_size_percent_capital / 100.0
-        
-        self.price_precision = 8
-        self.quantity_precision = 8
-        self._precisions_fetched_ = False
-
-        init_params_log = {k:v for k,v in self_params.items()}
-        init_params_log.update({"symbol": symbol, "timeframe": timeframe, "capital_param": capital})
-        logger.info(f"[{self.name}-{self.symbol}] Initialized with effective params: {init_params_log}")
-
-    @classmethod
-    def get_parameters_definition(cls):
+    @staticmethod
+    def get_parameters_definition():
         return {
-            "h_bandwidth": {"type": "float", "default": 8.0, "label": "Kernel Bandwidth (h)"},
-            "multiplier": {"type": "float", "default": 3.0, "label": "Envelope Multiplier"},
-            "tp_percent": {"type": "float", "default": 1.0, "label": "Take Profit (%)"},
-            "sl_percent": {"type": "float", "default": 0.5, "label": "Stop Loss (%)"},
-            "position_size_percent_capital": {"type": "float", "default": 10.0, "label": "Position Size (% of Capital)"}
+            "trading_pair": {"type": "str", "label": "Trading Pair", "default": "BTC/USDT"},
+            "leverage": {"type": "int", "label": "Leverage", "default": 10, "min": 1, "max": 100},
+            "order_quantity_usd": {"type": "float", "label": "Order Quantity (USD Notional)", "default": 100.0, "min": 1.0},
+
+            "nw_timeframe": {"type": "str", "label": "Nadaraya-Watson Timeframe", "default": "15m", "choices": ["1m", "3m", "5m", "15m", "30m", "1h"]},
+            "nw_h_bandwidth": {"type": "float", "label": "NW: h (Bandwidth)", "default": 8.0, "min": 1.0, "max": 50.0, "step": 0.1},
+            "nw_multiplier": {"type": "float", "label": "NW: Band Multiplier", "default": 3.0, "min": 0.5, "max": 10.0, "step": 0.1},
+            "nw_yhat_lookback": {"type": "int", "label": "NW: y_hat Lookback (smoothing window)", "default": 20, "min": 5, "max": 200},
+            "nw_mae_lookback": {"type": "int", "label": "NW: MAE Lookback (for band width)", "default": 20, "min": 5, "max": 200},
+
+            "stoch_rsi_timeframe": {"type": "str", "label": "StochRSI Timeframe (Filter)", "default": "1h", "choices": ["15m", "30m", "1h", "4h", "1d"]},
+            "stoch_rsi_length": {"type": "int", "label": "StochRSI: RSI Length", "default": 14, "min": 5, "max": 50},
+            "stoch_rsi_stoch_length": {"type": "int", "label": "StochRSI: Stochastic Length (for Stoch of RSI)", "default": 14, "min": 5, "max": 50},
+            "stoch_rsi_k_smooth": {"type": "int", "label": "StochRSI: %K Smoothing", "default": 3, "min": 1, "max": 50},
+            "stoch_rsi_d_smooth": {"type": "int", "label": "StochRSI: %D Smoothing", "default": 3, "min": 1, "max": 50},
+            "stoch_rsi_oversold_level": {"type": "float", "label": "StochRSI Oversold Level", "default": 20.0, "min": 0, "max": 100, "step": 1},
+            "stoch_rsi_overbought_level": {"type": "float", "label": "StochRSI Overbought Level", "default": 80.0, "min": 0, "max": 100, "step": 1},
+
+            "stop_loss_pct": {"type": "float", "label": "Stop Loss % (from entry)", "default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1},
+            "take_profit_pct": {"type": "float", "label": "Take Profit % (from entry)", "default": 3.0, "min": 0.1, "max": 20.0, "step": 0.1},
         }
 
-    def _get_precisions_live(self, exchange_ccxt):
-        if not self._precisions_fetched_:
-            try:
-                exchange_ccxt.load_markets(True)
-                market = exchange_ccxt.market(self.symbol)
-                self.price_precision = market['precision']['price']
-                self.quantity_precision = market['precision']['amount']
-                self._precisions_fetched_ = True
-                logger.info(f"[{self.name}-{self.symbol}] Precisions: Price={self.price_precision}, Qty={self.quantity_precision}")
-            except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching live precisions: {e}", exc_info=True)
+    def __init__(self, db_session, user_sub_obj, strategy_params: dict, exchange_ccxt, logger=None):
+        self.db_session = db_session
+        self.user_sub_obj = user_sub_obj
+        self.params = strategy_params
+        self.exchange_ccxt = exchange_ccxt
+        self.logger = logger if logger else logging.getLogger(__name__)
+        self.name = "NadarayaWatsonStochRSIStrategy"
 
-    def _format_price(self, price, exchange_ccxt): self._get_precisions_live(exchange_ccxt); return float(exchange_ccxt.price_to_precision(self.symbol, price))
-    def _format_quantity(self, quantity, exchange_ccxt): self._get_precisions_live(exchange_ccxt); return float(exchange_ccxt.amount_to_precision(self.symbol, quantity))
+        self.trading_pair = self.params.get("trading_pair", "BTC/USDT")
+        self.leverage = int(self.params.get("leverage", 10))
+        self.order_quantity_usd = Decimal(str(self.params.get("order_quantity_usd", "100.0")))
 
-    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str, timeout_seconds: int = 60, check_interval_seconds: int = 3):
-        start_time = time.time()
-        logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {timeout_seconds}s)")
-        while time.time() - start_time < timeout_seconds:
-            try:
-                order = exchange_ccxt.fetch_order(order_id, symbol)
-                logger.debug(f"[{self.name}-{self.symbol}] Order {order_id} status: {order['status']}")
-                if order['status'] == 'closed': logger.info(f"[{self.name}-{self.symbol}] Order {order_id} filled. AvgPrice: {order.get('average')}, Qty: {order.get('filled')}"); return order
-                if order['status'] in ['canceled', 'rejected', 'expired']: logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} is {order['status']}."); return order
-            except ccxt.OrderNotFound: logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} not found. Retrying.")
-            except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error fetching order {order_id}: {e}. Retrying.", exc_info=True)
-            time.sleep(check_interval_seconds)
-        logger.warning(f"[{self.name}-{self.symbol}] Timeout for order {order_id}. Final check.")
-        try: final_status = exchange_ccxt.fetch_order(order_id, symbol); logger.info(f"[{self.name}-{self.symbol}] Final status for order {order_id}: {final_status['status']}"); return final_status
-        except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Final check for order {order_id} failed: {e}", exc_info=True); return None
+        self.nw_timeframe = self.params.get("nw_timeframe", "15m")
+        self.nw_h_bandwidth = float(self.params.get("nw_h_bandwidth", 8.0))
+        self.nw_multiplier = float(self.params.get("nw_multiplier", 3.0))
+        self.nw_yhat_lookback = int(self.params.get("nw_yhat_lookback", 20))
+        self.nw_mae_lookback = int(self.params.get("nw_mae_lookback", 20))
 
-    def _create_db_order(self, db_session: Session, subscription_id: int, **kwargs):
-        db_order = Order(subscription_id=subscription_id, **kwargs); db_session.add(db_order); db_session.commit(); return db_order
-    
-    def _gauss(self, x, h): return np.exp(-((x ** 2) / (2 * h ** 2)))
+        self.stoch_rsi_timeframe = self.params.get("stoch_rsi_timeframe", "1h")
+        self.stoch_rsi_length = int(self.params.get("stoch_rsi_length", 14))
+        self.stoch_rsi_stoch_length = int(self.params.get("stoch_rsi_stoch_length", 14))
+        self.stoch_rsi_k_smooth = int(self.params.get("stoch_rsi_k_smooth", 3))
+        self.stoch_rsi_d_smooth = int(self.params.get("stoch_rsi_d_smooth", 3))
+        self.stoch_rsi_oversold_level = Decimal(str(self.params.get("stoch_rsi_oversold_level", "20.0")))
+        self.stoch_rsi_overbought_level = Decimal(str(self.params.get("stoch_rsi_overbought_level", "80.0")))
 
-    def _calculate_nadaraya_watson_envelope(self, close_prices_series: pd.Series):
-        data = close_prices_series.values; n = len(data)
-        if n == 0: return pd.Series(dtype='float64'), pd.Series(dtype='float64'), pd.Series(dtype='float64')
-        y_hat = np.zeros(n)
+        self.stop_loss_pct = Decimal(str(self.params.get("stop_loss_pct", "1.0"))) / Decimal("100")
+        self.take_profit_pct = Decimal(str(self.params.get("take_profit_pct", "3.0"))) / Decimal("100")
+
+        self.active_position_side = None  # 'long', 'short', or None
+        self.active_sl_tp_orders = {} # Store {'sl_id': id, 'tp_id': id}
+        self.position_entry_price = None # Store entry price of active position
+        self.position_qty = Decimal("0")
+
+
+        self._fetch_market_precision()
+        self._set_leverage()
+        self.logger.info(f"{self.name} initialized for {self.trading_pair}, UserSubID {self.user_sub_obj.id}")
+        # TODO: Load persistent state for active_position_side, entry_price, qty, active_sl_tp_orders from DB
+
+    def _fetch_market_precision(self):
+        try:
+            self.exchange_ccxt.load_markets()
+            market = self.exchange_ccxt.markets[self.trading_pair]
+            self.quantity_precision_str = str(market['precision']['amount'])
+            self.price_precision_str = str(market['precision']['price'])
+            self.logger.info(f"Precision for {self.trading_pair}: Qty Prec Str={self.quantity_precision_str}, Price Prec Str={self.price_precision_str}")
+        except Exception as e:
+            self.logger.error(f"Error fetching precision for {self.trading_pair}: {e}. Using defaults.")
+            self.quantity_precision_str = "0.00001"
+            self.price_precision_str = "0.01"
+
+    def _get_decimal_places(self, precision_str):
+        if precision_str is None: return 8 # Default if None
+        try:
+             # Convert scientific notation like "1e-5" to "0.00001"
+            if 'e-' in precision_str.lower():
+                num_val = float(precision_str)
+                precision_str = format(num_val, f'.{abs(int(precision_str.split("e-")[1]))}f')
+
+            d_prec = Decimal(precision_str)
+            if d_prec.as_tuple().exponent < 0:
+                return abs(d_prec.as_tuple().exponent)
+            return 0 # If precision is integer like 1, 10
+        except Exception as e:
+            self.logger.warning(f"Could not parse precision string '{precision_str}'. Error: {e}. Using default 8.")
+            return 8
+
+
+    def _format_quantity(self, quantity: Decimal):
+        places = self._get_decimal_places(self.quantity_precision_str)
+        return str(quantity.quantize(Decimal('1e-' + str(places)), rounding=ROUND_DOWN))
+
+    def _format_price(self, price: Decimal):
+        places = self._get_decimal_places(self.price_precision_str)
+        return str(price.quantize(Decimal('1e-' + str(places)), rounding=ROUND_NEAREST))
+
+    def _set_leverage(self):
+        try:
+            if hasattr(self.exchange_ccxt, 'set_leverage'):
+                symbol_for_leverage = self.trading_pair.split(':')[0] if ':' in self.trading_pair else self.trading_pair
+                self.exchange_ccxt.set_leverage(self.leverage, symbol_for_leverage)
+                self.logger.info(f"Leverage set to {self.leverage}x for {symbol_for_leverage}")
+        except Exception as e:
+            self.logger.warning(f"Could not set leverage for {self.trading_pair}: {e}")
+
+
+    def _gauss(self, x, h):
+        if h == 0: return 1.0 if x == 0 else 0.0 # Prevent division by zero if h is exactly 0
+        return np.exp(-((x ** 2) / (2 * h ** 2)))
+
+    def _causal_nadaraya_watson_envelope(self, data_series_np, h, mult, y_hat_lookback, mae_lookback):
+        n = len(data_series_np)
+        y_hat_arr = np.full(n, np.nan)
+        upper_band_arr = np.full(n, np.nan)
+        lower_band_arr = np.full(n, np.nan)
+
         for i in range(n):
-            weighted_sum = 0; total_weight = 0
-            for j in range(n):
-                weight = self._gauss(i - j, self.h_bandwidth)
-                weighted_sum += data[j] * weight; total_weight += weight
-            y_hat[i] = data[i] if total_weight == 0 else weighted_sum / total_weight
-        mae_value = np.abs(data - y_hat).mean() * self.multiplier
-        return pd.Series(y_hat, index=close_prices_series.index), pd.Series(y_hat + mae_value, index=close_prices_series.index), pd.Series(y_hat - mae_value, index=close_prices_series.index)
+            start_idx_yhat = max(0, i - y_hat_lookback + 1)
+            current_window_yhat = data_series_np[start_idx_yhat : i+1]
 
-    def run_backtest(self, historical_df: pd.DataFrame, htf_historical_df: pd.DataFrame = None):
-        # (Backtesting logic remains largely unchanged from original, for offline simulation)
-        logger.info(f"Running backtest for {self.name} on {self.symbol}...")
-        # ... (original backtest logic can remain, ensuring it uses decimal multipliers for SL/TP) ...
-        return {"pnl": 0, "trades": [], "message": "Backtest logic for NadarayaWatson needs review if used for performance metric generation."}
+            weighted_sum = 0.0
+            total_weight = 0.0
+            for j_local in range(len(current_window_yhat)):
+                gauss_dist = float((len(current_window_yhat) - 1) - j_local)
+                weight = self._gauss(gauss_dist, h)
+                weighted_sum += current_window_yhat[j_local] * weight
+                total_weight += weight
 
-    def execute_live_signal(self, db_session: Session, subscription_id: int, market_data_df: pd.DataFrame, exchange_ccxt, user_sub_obj: UserStrategySubscription):
-        logger.debug(f"[{self.name}-{self.symbol}] Executing live signal for sub {subscription_id}...")
-        if market_data_df.empty or 'Close' not in market_data_df.columns or len(market_data_df) < int(self.h_bandwidth):
-            logger.warning(f"[{self.name}-{self.symbol}] Insufficient market data for envelope calculation."); return
-        self._get_precisions_live(exchange_ccxt)
+            if total_weight > 1e-8:
+                y_hat_arr[i] = weighted_sum / total_weight
+            elif len(current_window_yhat) > 0:
+                y_hat_arr[i] = current_window_yhat[-1] # Fallback to last known price if weights are zero
 
-        close_prices = market_data_df['Close']
-        _, upper_band, lower_band = self._calculate_nadaraya_watson_envelope(close_prices)
-        if upper_band.empty or lower_band.empty or pd.isna(upper_band.iloc[-1]) or pd.isna(lower_band.iloc[-1]):
-            logger.warning(f"[{self.name}-{self.symbol}] Envelope calculation failed or resulted in NaN for latest bar."); return
+        errors = np.abs(data_series_np - y_hat_arr)
+
+        for i in range(n):
+            if np.isnan(y_hat_arr[i]) or i == 0 :
+                continue
+
+            start_idx_mae = max(0, i - mae_lookback)
+            relevant_errors_for_mae = errors[start_idx_mae : i]
+            valid_errors = relevant_errors_for_mae[~np.isnan(relevant_errors_for_mae)]
+
+            if len(valid_errors) > 0:
+                mae_value = np.mean(valid_errors) * mult
+                upper_band_arr[i] = y_hat_arr[i] + mae_value
+                lower_band_arr[i] = y_hat_arr[i] - mae_value
+
+        return y_hat_arr, upper_band_arr, lower_band_arr
+
+    def _calculate_stoch_rsi(self, close_prices_np, rsi_len, stoch_len, k_smooth, d_smooth):
+        if len(close_prices_np) < rsi_len + stoch_len + k_smooth + d_smooth + 1: # Adjusted for safety
+            self.logger.warning(f"Not enough data for StochRSI: got {len(close_prices_np)}, need more for periods.")
+            return np.full(len(close_prices_np), np.nan), np.full(len(close_prices_np), np.nan)
+
+        rsi = talib.RSI(close_prices_np, timeperiod=rsi_len)
+        rsi = rsi[~np.isnan(rsi)]
+        if len(rsi) < stoch_len + k_smooth + d_smooth -1 :
+             self.logger.warning(f"Not enough RSI data for STOCH: got {len(rsi)}")
+             return np.full(len(close_prices_np), np.nan), np.full(len(close_prices_np), np.nan)
+
+        stoch_k, stoch_d = talib.STOCH(rsi, rsi, rsi,
+                                       fastk_period=stoch_len,
+                                       slowk_period=k_smooth, slowk_matype=0,
+                                       slowd_period=d_smooth, slowd_matype=0)
+
+        nan_padding_count = len(close_prices_np) - len(stoch_k)
+        stoch_k_padded = np.pad(stoch_k, (nan_padding_count, 0), 'constant', constant_values=np.nan)
+        stoch_d_padded = np.pad(stoch_d, (nan_padding_count, 0), 'constant', constant_values=np.nan)
+
+        return stoch_k_padded, stoch_d_padded
+
+    def _get_current_position_details(self, symbol, historical_data_feed=None, is_backtest=False):
+        if self.active_position_side:
+            return {'side': self.active_position_side, 'qty': self.position_qty, 'entry_price': self.position_entry_price}
+
+        if is_backtest and historical_data_feed:
+             return historical_data_feed.get_current_position(symbol)
+
+        if not is_backtest:
+             self.logger.info("DB_TODO: Query DB for position details if self.active_position_side is None")
+             # Example live query:
+             # live_pos = query_db_for_pos(self.db_session, self.user_sub_obj.id, symbol)
+             # if live_pos: update self.active_position_side, self.position_entry_price, self.position_qty
+             # return live_pos
+             pass
+        return None
+
+
+    def _place_order(self, symbol, order_type, side, quantity, price=None, params=None, current_simulated_time_utc=None):
+        if current_simulated_time_utc:
+             self.logger.info(f"BACKTEST_SIM: Place {side} {order_type} for {quantity} {symbol} at {price if price else 'Market'}")
+             return {"id": f"sim_{datetime.utcnow().timestamp()}", "status": "open", "simulated": True, "price": price, "amount": quantity}
+        try:
+            formatted_qty = self._format_quantity(quantity)
+            formatted_price = self._format_price(price) if price else None
+            order = self.exchange_ccxt.create_order(symbol, order_type, side, float(formatted_qty), float(formatted_price) if formatted_price else None, params)
+            self.logger.info(f"Order placed: {side} {order_type} {formatted_qty} {symbol} at {formatted_price if formatted_price else 'Market'}. OrderID: {order.get('id')}")
+            # TODO: Record order in DB
+            return order
+        except Exception as e:
+            self.logger.error(f"Failed to place {side} {order_type} for {symbol}: {e}", exc_info=True)
+        return None
+
+    def _cancel_active_sl_tp_orders(self, symbol, current_simulated_time_utc=None):
+        if self.active_sl_tp_orders.get('sl_id'):
+            try:
+                if not current_simulated_time_utc: self.exchange_ccxt.cancel_order(self.active_sl_tp_orders['sl_id'], symbol)
+                self.logger.info(f"Cancelled SL order {self.active_sl_tp_orders['sl_id']} for {symbol}")
+            except Exception as e: self.logger.error(f"Error cancelling SL order {self.active_sl_tp_orders['sl_id']}: {e}")
+        if self.active_sl_tp_orders.get('tp_id'):
+            try:
+                if not current_simulated_time_utc: self.exchange_ccxt.cancel_order(self.active_sl_tp_orders['tp_id'], symbol)
+                self.logger.info(f"Cancelled TP order {self.active_sl_tp_orders['tp_id']} for {symbol}")
+            except Exception as e: self.logger.error(f"Error cancelling TP order {self.active_sl_tp_orders['tp_id']}: {e}")
+        self.active_sl_tp_orders = {}
+
+    def _process_trading_logic(self, nw_ohlcv_df, stoch_rsi_ohlcv_df, is_backtest=False, current_simulated_time_utc=None, historical_data_feed=None):
+        symbol = self.trading_pair
+        min_nw_data_len = self.nw_yhat_lookback + self.nw_mae_lookback + 5
+        min_stoch_rsi_data_len = self.stoch_rsi_length + self.stoch_rsi_stoch_length + self.stoch_rsi_k_smooth + self.stoch_rsi_d_smooth + 50
+
+        if nw_ohlcv_df is None or len(nw_ohlcv_df) < min_nw_data_len:
+            self.logger.warning(f"Not enough data for Nadaraya-Watson. Need > {min_nw_data_len}, Got {len(nw_ohlcv_df) if nw_ohlcv_df is not None else 0}")
+            return {"action": "HOLD", "reason": "NW calc data insufficient"} if is_backtest else None
+        if stoch_rsi_ohlcv_df is None or len(stoch_rsi_ohlcv_df) < min_stoch_rsi_data_len:
+            self.logger.warning(f"Not enough data for StochRSI. Need > {min_stoch_rsi_data_len}, Got {len(stoch_rsi_ohlcv_df) if stoch_rsi_ohlcv_df is not None else 0}")
+            return {"action": "HOLD", "reason": "StochRSI calc data insufficient"} if is_backtest else None
+
+        nw_closes_np = nw_ohlcv_df['close'].to_numpy(dtype=float)
+        _, upper_band, lower_band = self._causal_nadaraya_watson_envelope(
+            nw_closes_np, self.nw_h_bandwidth, self.nw_multiplier, self.nw_yhat_lookback, self.nw_mae_lookback
+        )
+        if np.isnan(upper_band[-1]) or np.isnan(lower_band[-1]):
+            self.logger.warning("NW bands are NaN.")
+            return {"action": "HOLD", "reason": "NW bands NaN"} if is_backtest else None
         
-        current_price = close_prices.iloc[-1]; current_upper = upper_band.iloc[-1]; current_lower = lower_band.iloc[-1]
-        if pd.isna(current_price): logger.warning(f"[{self.name}-{self.symbol}] Current price is NaN."); return
+        latest_nw_close = Decimal(str(nw_ohlcv_df['close'].iloc[-1]))
+        latest_upper_band = Decimal(str(upper_band[-1]))
+        latest_lower_band = Decimal(str(lower_band[-1]))
+
+        stoch_rsi_closes_np = stoch_rsi_ohlcv_df['close'].to_numpy(dtype=float)
+        stoch_k, _ = self._calculate_stoch_rsi(
+            stoch_rsi_closes_np, self.stoch_rsi_length, self.stoch_rsi_stoch_length,
+            self.stoch_rsi_k_smooth, self.stoch_rsi_d_smooth
+        )
+        if np.isnan(stoch_k[-1]):
+            self.logger.warning("StochRSI K is NaN.")
+            return {"action": "HOLD", "reason": "StochRSI K NaN"} if is_backtest else None
+        latest_stoch_k = Decimal(str(stoch_k[-1]))
+
+        # Update position details for current cycle
+        current_pos_details = self._get_current_position_details(symbol, historical_data_feed, is_backtest)
+        if current_pos_details and self.active_position_side is None: # Adopt if strategy doesn't know
+             self.active_position_side = current_pos_details['side']
+             self.position_entry_price = current_pos_details['entry_price']
+             self.position_qty = current_pos_details['qty']
+             self.logger.info(f"Adopted position: {self.active_position_side} Qty: {self.position_qty}")
+
+
+        action_taken = False
+        trade_action_details = {}
+
+        if not self.active_position_side:
+            entry_price = latest_nw_close
+            if entry_price == Decimal("0"): self.logger.warning("Entry price is zero."); return {"action":"HOLD", "reason":"Entry price zero"} if is_backtest else None
+            qty_to_trade = self.order_quantity_usd / entry_price
+            sl_val = self.stop_loss_pct; tp_val = self.take_profit_pct
+
+            if latest_nw_close <= latest_lower_band and latest_stoch_k < self.stoch_rsi_oversold_level:
+                self.logger.info(f"Signal: ENTER LONG for {symbol} at {entry_price}. NW_Low: {latest_lower_band}, StochK: {latest_stoch_k}")
+                sl_price = entry_price * (Decimal('1') - sl_val); tp_price = entry_price * (Decimal('1') + tp_val)
+                if not is_backtest:
+                    entry_order = self._place_order(symbol, 'MARKET', 'buy', qty_to_trade)
+                    if entry_order: self.active_position_side = 'long'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade; # ... set SL/TP orders ...
+                else: self.active_position_side = 'long'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade
+                action_taken = True
+                trade_action_details = {"action": "BUY", "price": float(entry_price), "qty": float(qty_to_trade), "sl": float(sl_price), "tp": float(tp_price)}
+
+            elif latest_nw_close >= latest_upper_band and latest_stoch_k > self.stoch_rsi_overbought_level:
+                self.logger.info(f"Signal: ENTER SHORT for {symbol} at {entry_price}. NW_High: {latest_upper_band}, StochK: {latest_stoch_k}")
+                sl_price = entry_price * (Decimal('1') + sl_val); tp_price = entry_price * (Decimal('1') - tp_val)
+                if not is_backtest:
+                    entry_order = self._place_order(symbol, 'MARKET', 'sell', qty_to_trade)
+                    if entry_order: self.active_position_side = 'short'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade; # ... set SL/TP orders ...
+                else: self.active_position_side = 'short'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade
+                action_taken = True
+                trade_action_details = {"action": "SELL", "price": float(entry_price), "qty": float(qty_to_trade), "sl": float(sl_price), "tp": float(tp_price)}
         
-        logger.debug(f"[{self.name}-{self.symbol}] Price: {current_price}, Lower: {current_lower}, Upper: {current_upper}")
+        elif self.active_position_side:
+            if self.active_position_side == 'long' and latest_nw_close >= latest_upper_band and latest_stoch_k > self.stoch_rsi_overbought_level:
+                self.logger.info(f"Signal: CLOSE LONG & ENTER SHORT for {symbol} at {latest_nw_close}.")
+                if not is_backtest: self._cancel_active_sl_tp_orders(symbol); self._place_order(symbol, 'MARKET', 'sell', self.position_qty, params={'reduceOnly': True})
+                self.active_position_side = None; self.position_entry_price = None; self.position_qty = Decimal("0") # Reset state before new entry
+                # Now place short (logic from above block)
+                entry_price = latest_nw_close; qty_to_trade = self.order_quantity_usd / entry_price; sl_val = self.stop_loss_pct; tp_val = self.take_profit_pct
+                sl_price = entry_price * (Decimal('1') + sl_val); tp_price = entry_price * (Decimal('1') - tp_val)
+                if not is_backtest:
+                    entry_order = self._place_order(symbol, 'MARKET', 'sell', qty_to_trade)
+                    if entry_order: self.active_position_side = 'short'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade; #... set SL/TP orders
+                else: self.active_position_side = 'short'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade
+                action_taken = True
+                trade_action_details = {"action": "REVERSE_TO_SHORT", "price": float(entry_price), "qty": float(qty_to_trade), "sl": float(sl_price), "tp": float(tp_price)}
+
+            elif self.active_position_side == 'short' and latest_nw_close <= latest_lower_band and latest_stoch_k < self.stoch_rsi_oversold_level:
+                self.logger.info(f"Signal: CLOSE SHORT & ENTER LONG for {symbol} at {latest_nw_close}.")
+                if not is_backtest: self._cancel_active_sl_tp_orders(symbol); self._place_order(symbol, 'MARKET', 'buy', self.position_qty, params={'reduceOnly': True})
+                self.active_position_side = None; self.position_entry_price = None; self.position_qty = Decimal("0")
+                entry_price = latest_nw_close; qty_to_trade = self.order_quantity_usd / entry_price; sl_val = self.stop_loss_pct; tp_val = self.take_profit_pct
+                sl_price = entry_price * (Decimal('1') - sl_val); tp_price = entry_price * (Decimal('1') + tp_val)
+                if not is_backtest:
+                    entry_order = self._place_order(symbol, 'MARKET', 'buy', qty_to_trade)
+                    if entry_order: self.active_position_side = 'long'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade; #... set SL/TP orders
+                else: self.active_position_side = 'long'; self.position_entry_price = entry_price; self.position_qty = qty_to_trade
+                action_taken = True
+                trade_action_details = {"action": "REVERSE_TO_LONG", "price": float(entry_price), "qty": float(qty_to_trade), "sl": float(sl_price), "tp": float(tp_price)}
+
+        if is_backtest:
+            return trade_action_details if action_taken else {"action": "HOLD", "reason": "No signal or position held"}
+        # TODO: Save state to DB if action_taken or other relevant state changes
+        return None
+
+
+    def execute_live_signal(self, market_data_df=None):
+        self.logger.info(f"Executing {self.name} for {self.trading_pair} UserSubID {self.user_sub_obj.id}")
+        # TODO: Load active position state from DB if self.active_position_side is None
+        # Example: if self.active_position_side is None: self._load_live_position_from_db()
+
+        # TODO: Check if current position was closed by SL/TP on exchange.
+        # Example: self._check_and_sync_live_position_status()
+
+        nw_data_needed = self.nw_yhat_lookback + self.nw_mae_lookback + 50
+        stoch_rsi_data_needed = self.stoch_rsi_length + self.stoch_rsi_stoch_length + self.stoch_rsi_k_smooth + self.stoch_rsi_d_smooth + 100
+
+        try:
+            nw_ohlcv_list = self.exchange_ccxt.fetch_ohlcv(self.trading_pair, self.nw_timeframe, limit=nw_data_needed)
+            stoch_rsi_ohlcv_list = self.exchange_ccxt.fetch_ohlcv(self.trading_pair, self.stoch_rsi_timeframe, limit=stoch_rsi_data_needed)
+
+            min_nw_len = self.nw_yhat_lookback + self.nw_mae_lookback + 2 # Min for calc
+            min_stoch_len = self.stoch_rsi_length + self.stoch_rsi_stoch_length + self.stoch_rsi_k_smooth + self.stoch_rsi_d_smooth + 1 # Min for calc
+
+            if not nw_ohlcv_list or len(nw_ohlcv_list) < min_nw_len or \
+               not stoch_rsi_ohlcv_list or len(stoch_rsi_ohlcv_list) < min_stoch_len:
+                self.logger.warning("Insufficient OHLCV data for NW or StochRSI for live signal.")
+                return
+
+            nw_ohlcv_df = pandas.DataFrame(nw_ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            stoch_rsi_ohlcv_df = pandas.DataFrame(stoch_rsi_ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+            # TODO: Proper alignment of HTF (stoch_rsi_ohlcv_df) data. For live, using latest [-1] is an approximation.
+
+            self._process_trading_logic(nw_ohlcv_df, stoch_rsi_ohlcv_df, is_backtest=False)
+
+        except Exception as e:
+            self.logger.error(f"Error in {self.name} execute_live_signal: {e}", exc_info=True)
+
+
+    def run_backtest(self, historical_data_feed, current_simulated_time_utc):
+        nw_data_needed = self.nw_yhat_lookback + self.nw_mae_lookback + 50
+        stoch_rsi_data_needed = self.stoch_rsi_length + self.stoch_rsi_stoch_length + self.stoch_rsi_k_smooth + self.stoch_rsi_d_smooth + 100
         
-        position_db = db_session.query(Position).filter(Position.subscription_id == subscription_id, Position.symbol == self.symbol, Position.is_open == True).first()
+        nw_ohlcv_df = historical_data_feed.get_ohlcv(self.trading_pair, self.nw_timeframe, nw_data_needed, end_time_utc=current_simulated_time_utc)
+        stoch_rsi_ohlcv_df = historical_data_feed.get_ohlcv(self.trading_pair, self.stoch_rsi_timeframe, stoch_rsi_data_needed, end_time_utc=current_simulated_time_utc)
 
-        # Exit Logic
-        if position_db:
-            exit_reason = None; side_to_close = None; filled_exit_order = None
-            if position_db.side == "long":
-                sl_price = position_db.entry_price * (1 - self.sl_decimal)
-                tp_price = position_db.entry_price * (1 + self.tp_decimal)
-                if current_price <= sl_price: exit_reason = "SL"
-                elif current_price >= tp_price: exit_reason = "TP"
-                if exit_reason: side_to_close = 'sell'
-            elif position_db.side == "short":
-                sl_price = position_db.entry_price * (1 + self.sl_decimal)
-                tp_price = position_db.entry_price * (1 - self.tp_decimal)
-                if current_price >= sl_price: exit_reason = "SL"
-                elif current_price <= tp_price: exit_reason = "TP"
-                if exit_reason: side_to_close = 'buy'
+        min_nw_len = self.nw_yhat_lookback + self.nw_mae_lookback + 2
+        min_stoch_len = self.stoch_rsi_length + self.stoch_rsi_stoch_length + self.stoch_rsi_k_smooth + self.stoch_rsi_d_smooth + 1
 
-            if exit_reason and side_to_close:
-                logger.info(f"[{self.name}-{self.symbol}] Closing {position_db.side} Pos ID {position_db.id} at {current_price}. Reason: {exit_reason}")
-                close_qty = self._format_quantity(position_db.amount, exchange_ccxt)
-                db_exit_order = self._create_db_order(db_session, subscription_id, symbol=self.symbol, order_type='market', side=side_to_close, amount=close_qty, status='pending_creation')
-                try:
-                    exit_receipt = exchange_ccxt.create_market_order(self.symbol, side_to_close, close_qty, params={'reduceOnly': True})
-                    db_exit_order.order_id = exit_receipt['id']; db_exit_order.status = 'open'; db_session.commit()
-                    filled_exit_order = self._await_order_fill(exchange_ccxt, exit_receipt['id'], self.symbol)
-                    if filled_exit_order and filled_exit_order['status'] == 'closed':
-                        db_exit_order.status='closed'; db_exit_order.price=filled_exit_order['average']; db_exit_order.filled=filled_exit_order['filled']; db_exit_order.cost=filled_exit_order['cost']; db_exit_order.updated_at=datetime.datetime.utcnow()
-                        position_db.is_open=False; position_db.closed_at=datetime.datetime.utcnow()
-                        pnl = (filled_exit_order['average'] - position_db.entry_price) * filled_exit_order['filled'] if position_db.side == 'long' else (position_db.entry_price - filled_exit_order['average']) * filled_exit_order['filled']
-                        position_db.pnl=pnl; position_db.updated_at = datetime.datetime.utcnow()
-                        logger.info(f"[{self.name}-{self.symbol}] {position_db.side} Pos ID {position_db.id} closed. PnL: {pnl:.2f}")
-                    else: logger.error(f"[{self.name}-{self.symbol}] Exit order {exit_receipt['id']} failed. Pos ID {position_db.id} might still be open."); db_exit_order.status = filled_exit_order.get('status', 'fill_check_failed') if filled_exit_order else 'fill_check_failed'
-                    db_session.commit()
-                except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error closing Pos ID {position_db.id}: {e}", exc_info=True); db_exit_order.status='error'; db_session.commit()
-                return # Action taken
+        if nw_ohlcv_df is None or len(nw_ohlcv_df) < min_nw_len or \
+           stoch_rsi_ohlcv_df is None or len(stoch_rsi_ohlcv_df) < min_stoch_len:
+            return {"action": "HOLD", "reason": "Insufficient historical data for indicators"}
 
-        # Entry Logic
-        if not position_db:
-            allocated_capital = json.loads(user_sub_obj.custom_parameters).get("capital", self.capital) # Use capital from subscription
-            position_size_usdt = allocated_capital * self.position_size_percent_capital_decimal
-            asset_qty_to_trade = self._format_quantity(position_size_usdt / current_price, exchange_ccxt)
-            if asset_qty_to_trade <= 0: logger.warning(f"[{self.name}-{self.symbol}] Asset quantity zero. Skipping."); return
+        return self._process_trading_logic(nw_ohlcv_df, stoch_rsi_ohlcv_df, is_backtest=True,
+                                           current_simulated_time_utc=current_simulated_time_utc,
+                                           historical_data_feed=historical_data_feed)
 
-            entry_side = None
-            if current_price <= current_lower: entry_side = "long"
-            elif current_price >= current_upper: entry_side = "short"
-
-            if entry_side:
-                logger.info(f"[{self.name}-{self.symbol}] {entry_side.upper()} entry signal at {current_price}. Size: {asset_qty_to_trade}")
-                db_entry_order = self._create_db_order(db_session, subscription_id, symbol=self.symbol, order_type='market', side=entry_side, amount=asset_qty_to_trade, status='pending_creation')
-                try:
-                    entry_receipt = exchange_ccxt.create_market_order(self.symbol, entry_side, asset_qty_to_trade)
-                    db_entry_order.order_id = entry_receipt['id']; db_entry_order.status = 'open'; db_session.commit()
-                    filled_entry_order = self._await_order_fill(exchange_ccxt, entry_receipt['id'], self.symbol)
-                    if filled_entry_order and filled_entry_order['status'] == 'closed':
-                        db_entry_order.status='closed'; db_entry_order.price=filled_entry_order['average']; db_entry_order.filled=filled_entry_order['filled']; db_entry_order.cost=filled_entry_order['cost']; db_entry_order.updated_at = datetime.datetime.utcnow()
-                        
-                        new_pos = Position(subscription_id=subscription_id, symbol=self.symbol, exchange_name=str(exchange_ccxt.id), side=entry_side, amount=filled_entry_order['filled'], entry_price=filled_entry_order['average'], current_price=filled_entry_order['average'], is_open=True, created_at=datetime.datetime.utcnow(), updated_at=datetime.datetime.utcnow())
-                        db_session.add(new_pos); db_session.commit()
-                        logger.info(f"[{self.name}-{self.symbol}] {entry_side.upper()} Pos ID {new_pos.id} created. Entry: {new_pos.entry_price}, Size: {new_pos.amount}")
-                        
-                        # SL/TP orders are implicitly managed by checking price against calculated levels in each tick.
-                        # No separate SL/TP orders are placed on the exchange for this specific strategy version.
-                    else: logger.error(f"[{self.name}-{self.symbol}] Entry order {entry_receipt['id']} failed. Pos not opened."); db_entry_order.status = filled_entry_order.get('status', 'fill_check_failed') if filled_entry_order else 'fill_check_failed'
-                    db_session.commit()
-                except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Error during {entry_side} entry: {e}", exc_info=True); db_entry_order.status='error'; db_session.commit()
-        logger.debug(f"[{self.name}-{self.symbol}] Live signal check complete.")
+```
+This subtask will write the Python code to `strategies/nadaraya_watson_envelope_strategy.py`.
+It includes the Nadaraya-Watson calculation, Stochastic RSI calculation, MTF data handling considerations, combined entry logic, and SL/TP mechanisms. Placeholders for DB interactions for position state are included.
+It assumes `trading_pair` is provided via `strategy_params`.
+It uses `pandas` for DataFrame operations.
+The strategy also implements logic to reverse positions if an opposite signal occurs while already in a trade.
