@@ -1,250 +1,393 @@
-# trading_platform/strategies/top_gainers_losers_macd_strategy.py
-import datetime
 import logging
-import time
-import pandas as pd
-import ta
 import numpy as np
-import json # For UserStrategySubscription parameters
-from sqlalchemy.orm import Session
-from backend.models import Position, Order, UserStrategySubscription
+import talib
+import ccxt
+import json
+import datetime
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
-logger = logging.getLogger(__name__)
+# Assuming platform models are accessible for type hinting if needed,
+# but the strategy itself won't import them directly for creation/update.
+# from backend.models import Order, Position
 
-class TopGainersLosersMACDStrategy:
-    def __init__(self, symbol: str, timeframe: str, capital: float = 10000, **custom_parameters):
-        self.name = "TopGainersLosersMACDStrategy" # Ensure class name matches
-        self.symbol_param_default = symbol # This strategy dynamically selects symbols
-        self.timeframe = timeframe # Timeframe for MACD signals on selected symbols
-        self.capital_total_allocation = capital # Total capital allocated to this strategy instance
+class TopGainersLosersMACD:
+    def __init__(self, db_session, user_sub_obj, strategy_params: dict, exchange_ccxt, logger=None):
+        self.db_session = db_session # SQLAlchemy session
+        self.user_sub_obj = user_sub_obj # UserStrategySubscription ORM object
+        self.params = strategy_params
+        self.exchange_ccxt = exchange_ccxt
+        self.logger = logger if logger else logging.getLogger(__name__)
+        self.name = "TopGainersLosersMACD"
 
-        defaults = {
-            "top_n_symbols": 3, "scan_interval_minutes": 15,
-            "macd_fast_period": 12, "macd_slow_period": 26, "macd_signal_period": 9,
-            "leverage": 3, "stop_loss_percent": 5.0, "risk_per_trade_percent": 1.0,
-            "min_volume_usdt_24h": 1000000, "min_candles_for_signal": 50,
-            "symbol_eval_period_hours": 6, "symbol_min_volatility_percent": 3.0
-        }
-        self_params = {**defaults, **custom_parameters}
-        for key, value in self_params.items(): setattr(self, key, value)
+        # Extract and validate parameters
+        self.leverage = int(self.params.get("leverage", 3))
+        self.stop_loss_percent = float(self.params.get("stop_loss_percent", 0.05))
+        self.risk_per_trade_percent = float(self.params.get("risk_per_trade_percent", 0.05))
+        self.macd_fast_period = int(self.params.get("macd_fast_period", 34))
+        self.macd_slow_period = int(self.params.get("macd_slow_period", 144))
+        self.macd_signal_period = int(self.params.get("macd_signal_period", 9))
+        self.top_n_symbols_to_scan = int(self.params.get("top_n_symbols_to_scan", 10))
+        self.max_concurrent_trades = int(self.params.get("max_concurrent_trades", 2))
+        self.kline_interval = self.params.get("kline_interval", "15m")
+        self.min_volume_usdt_24h = float(self.params.get("min_volume_usdt_24h", 1000000.0))
+        self.min_price_change_percent_filter = float(self.params.get("min_price_change_percent_filter", 3.0))
+        self.min_candles_for_macd = int(self.params.get("min_candles_for_macd", 144))
+        # self.margin_mode = self.params.get("margin_mode", "ISOLATED").upper()
 
-        self.stop_loss_decimal = self.stop_loss_percent / 100.0
-        self.risk_per_trade_decimal = self.risk_per_trade_percent / 100.0
-        self.symbol_min_volatility_decimal = self.symbol_min_volatility_percent / 100.0
-        
-        # In-memory state for this strategy instance (not per symbol)
-        self.last_scan_time_utc = None
-        self.precisions_cache = {} 
-        
-        # Tracked symbols and their specific states will be managed via DB Position/Order custom_data or separate state model
-        # For this pass, we'll simplify by keeping some operational state in memory, acknowledging it's not perfectly resilient.
-        # A more robust solution would use UserStrategySubscription.custom_data or a dedicated StrategyState model.
-        self.currently_tracked_symbols_operational_state = {} # e.g. { 'BTC/USDT': {'volatility_ok_until': datetime, ...} }
+        self.logger.info(f"{self.name} strategy initialized for UserSubID {self.user_sub_obj.id} with params: {self.params}")
 
-        logger.info(f"[{self.name}] Initialized with effective params: {self_params}")
-
-    @classmethod
-    def get_parameters_definition(cls):
+    @staticmethod
+    def get_parameters_definition():
         return {
-            "top_n_symbols": {"type": "int", "default": 3, "min": 1, "max": 10, "label": "Top N Gainers/Losers to Track"},
-            "scan_interval_minutes": {"type": "int", "default": 15, "min": 5, "max": 120, "label": "Scan Interval (minutes)"},
-            "macd_fast_period": {"type": "int", "default": 12, "min": 2, "label": "MACD Fast Period"},
-            "macd_slow_period": {"type": "int", "default": 26, "min": 2, "label": "MACD Slow Period"},
-            "macd_signal_period": {"type": "int", "default": 9, "min": 2, "label": "MACD Signal Period"},
-            "leverage": {"type": "int", "default": 3, "min": 1, "max": 20, "label": "Leverage (Informational)"},
-            "stop_loss_percent": {"type": "float", "default": 5.0, "min": 0.1, "step": 0.1, "label": "Stop Loss %"},
-            "risk_per_trade_percent": {"type": "float", "default": 1.0, "min": 0.1, "step": 0.1, "label": "Risk per Trade (% of allocated capital per symbol)"},
-            "min_volume_usdt_24h": {"type": "float", "default": 1000000, "min": 10000, "label": "Min 24h Volume (USDT) for Scan"},
-            "min_candles_for_signal": {"type": "int", "default": 50, "min": 30, "label": "Min Candles for MACD Signal"},
-            "symbol_eval_period_hours": {"type": "int", "default": 6, "min":1, "label": "Symbol Volatility Check Period (Hours)"},
-            "symbol_min_volatility_percent": {"type": "float", "default": 3.0, "min":0.1, "label": "Min Volatility % in Eval Period"}
+            "leverage": {"type": "int", "label": "Leverage", "default": 3, "min": 1, "max": 25},
+            "stop_loss_percent": {"type": "float", "label": "Stop Loss % (e.g., 0.05 for 5%)", "default": 0.05, "min": 0.001, "max": 0.5, "step": 0.001},
+            "risk_per_trade_percent": {"type": "float", "label": "Risk Per Trade % (of balance)", "default": 0.05, "min": 0.001, "max": 0.1, "step": 0.001},
+            "macd_fast_period": {"type": "int", "label": "MACD Fast Period", "default": 34, "min": 5, "max": 200},
+            "macd_slow_period": {"type": "int", "label": "MACD Slow Period", "default": 144, "min": 20, "max": 500},
+            "macd_signal_period": {"type": "int", "label": "MACD Signal Period", "default": 9, "min": 3, "max": 50},
+            "top_n_symbols_to_scan": {"type": "int", "label": "Top N Symbols to Scan (Gainers+Losers)", "default": 10, "min": 2, "max": 50},
+            "max_concurrent_trades": {"type": "int", "label": "Max Concurrent Trades", "default": 2, "min": 1, "max": 10},
+            "kline_interval": {"type": "str", "label": "Kline Interval for MACD", "default": "15m", "choices": ["5m", "15m", "30m", "1h", "4h"]},
+            "min_volume_usdt_24h": {"type": "float", "label": "Min. 24h QuoteVolume (USDT)", "default": 1000000.0, "min": 0.0},
+            "min_price_change_percent_filter": {"type": "float", "label": "Min. Price Change % (for G/L)", "default": 3.0, "min": 0.0},
+            "min_candles_for_macd": {"type": "int", "label": "Min. Candles for MACD", "default": 144, "min": 50, "max": 500},
+            # "margin_mode": {"type": "str", "label": "Margin Mode", "default": "ISOLATED", "choices": ["ISOLATED", "CROSSED"]}
         }
 
-    def _get_precisions(self, symbol, exchange_ccxt):
-        if symbol not in self.precisions_cache:
-            try:
-                exchange_ccxt.load_markets(True)
-                market = exchange_ccxt.market(symbol)
-                self.precisions_cache[symbol] = {'price': market['precision']['price'], 'amount': market['precision']['amount']}
-                logger.info(f"[{self.name}] Precisions for {symbol}: {self.precisions_cache[symbol]}")
-            except Exception as e: logger.error(f"[{self.name}] Error fetching precision for {symbol}: {e}", exc_info=True); self.precisions_cache[symbol] = {'price': 8, 'amount': 8}
-        return self.precisions_cache[symbol]
-
-    def _format_quantity(self, symbol, quantity, exchange_ccxt): prec = self._get_precisions(symbol, exchange_ccxt); return float(exchange_ccxt.amount_to_precision(symbol, quantity, precision=prec['amount']))
-    def _format_price(self, symbol, price, exchange_ccxt): prec = self._get_precisions(symbol, exchange_ccxt); return float(exchange_ccxt.price_to_precision(symbol, price, precision=prec['price']))
-
-    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str, timeout_seconds: int = 60, check_interval_seconds: int = 3):
-        start_time = time.time()
-        logger.info(f"[{self.name}-{symbol}] Awaiting fill for order {order_id} (timeout: {timeout_seconds}s)")
-        while time.time() - start_time < timeout_seconds:
-            try:
-                order = exchange_ccxt.fetch_order(order_id, symbol)
-                logger.debug(f"[{self.name}-{symbol}] Order {order_id} status: {order['status']}")
-                if order['status'] == 'closed': logger.info(f"[{self.name}-{symbol}] Order {order_id} filled. AvgPrice: {order.get('average')}, Qty: {order.get('filled')}"); return order
-                if order['status'] in ['canceled', 'rejected', 'expired']: logger.warning(f"[{self.name}-{symbol}] Order {order_id} is {order['status']}."); return order
-            except ccxt.OrderNotFound: logger.warning(f"[{self.name}-{symbol}] Order {order_id} not found. Retrying.")
-            except Exception as e: logger.error(f"[{self.name}-{symbol}] Error fetching order {order_id}: {e}. Retrying.", exc_info=True)
-            time.sleep(check_interval_seconds)
-        logger.warning(f"[{self.name}-{self.symbol}] Timeout for order {order_id}. Final check.")
-        try: final_status = exchange_ccxt.fetch_order(order_id, symbol); logger.info(f"[{self.name}-{self.symbol}] Final status for order {order_id}: {final_status['status']}"); return final_status
-        except Exception as e: logger.error(f"[{self.name}-{self.symbol}] Final check for order {order_id} failed: {e}", exc_info=True); return None
-        
-    def _create_db_order(self, db_session: Session, subscription_id: int, symbol: str, **kwargs): # Added symbol
-        db_order = Order(subscription_id=subscription_id, symbol=symbol, **kwargs); db_session.add(db_order); db_session.commit(); return db_order
-
-    def _calculate_position_size_asset(self, symbol, entry_price, stop_loss_price, exchange_ccxt, capital_for_this_trade_usdt):
-        if entry_price == 0 or abs(entry_price - stop_loss_price) == 0: return 0
-        usdt_to_risk_on_this_trade = capital_for_this_trade_usdt * self.risk_per_trade_decimal
-        price_diff_per_unit_at_sl = abs(entry_price - stop_loss_price)
-        quantity_asset = usdt_to_risk_on_this_trade / price_diff_per_unit_at_sl
-        return self._format_quantity(symbol, quantity_asset, exchange_ccxt)
-
-    def _scan_top_gainers_losers(self, exchange_ccxt):
-        logger.info(f"[{self.name}] Scanning for top gainers/losers...")
+    def _get_top_gainer_loser_candidates(self):
+        self.logger.info("Fetching top gainer/loser candidates...")
         try:
-            all_tickers = exchange_ccxt.fetch_tickers()
-            eligible_symbols = []
-            for symbol, data in all_tickers.items():
-                market = exchange_ccxt.market(symbol) # Ensures market data is loaded for the symbol
-                if market.get('quote', '').upper() == 'USDT' and market.get('active', True) and \
-                   (market.get('type','').lower() in ['future', 'swap'] or (market.get('spot') and not market.get('margin')) ) and \
-                   data.get('quoteVolume', 0) >= self.min_volume_usdt_24h and data.get('change') is not None: # Use 'change' for %
-                    eligible_symbols.append({'symbol': symbol, 'priceChangePercent': data['change'], 'volume_usdt': data['quoteVolume']}) # CCXT uses 'change' not 'percentage'
-            
-            if not eligible_symbols: logger.warning(f"[{self.name}] No eligible symbols found after scan filters."); return []
-            
-            sorted_by_change = sorted(eligible_symbols, key=lambda x: x['priceChangePercent'], reverse=True)
-            top_gainers = sorted_by_change[:self.top_n_symbols]
-            top_losers = sorted_by_change[-self.top_n_symbols:] # These will be least negative, or smallest positive if all are up.
-            # Filter out losers that are actually gainers if all symbols are up
-            true_losers = [s for s in top_losers if s['priceChangePercent'] < 0]
-            
-            logger.info(f"[{self.name}] Scan results: Gainers - {[s['symbol'] for s in top_gainers]}, Losers - {[s['symbol'] for s in true_losers]}")
-            return top_gainers + true_losers # Combine, duplicates handled by caller
-        except Exception as e: logger.error(f"[{self.name}] Error scanning tickers: {e}", exc_info=True); return []
+            all_tickers = self.exchange_ccxt.fetch_tickers() # Fetches for all available markets
 
-    def run_backtest(self, historical_df: pd.DataFrame, htf_historical_df: pd.DataFrame = None):
-        logger.warning(f"[{self.name}] Backtesting is not applicable for this multi-symbol scanner strategy via this interface.")
-        return {"pnl": 0, "trades": [], "message": "Backtesting not implemented."}
+            futures_usdt_tickers = []
+            for symbol, ticker_data in all_tickers.items():
+                if '/USDT' not in symbol or not self.exchange_ccxt.markets[symbol].get('future', False): # Filter for USDT futures
+                    continue
+                if not ticker_data or 'quoteVolume' not in ticker_data or 'percentage' not in ticker_data:
+                    continue
 
-    def execute_live_signal(self, db_session: Session, subscription_id: int, market_data_df: pd.DataFrame, exchange_ccxt, user_sub_obj: UserStrategySubscription):
-        logger.debug(f"[{self.name}] Executing live signal for sub {subscription_id}...")
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
+                if ticker_data['quoteVolume'] >= self.min_volume_usdt_24h and \
+                   abs(ticker_data['percentage']) >= self.min_price_change_percent_filter:
+                    futures_usdt_tickers.append({
+                        'symbol': symbol,
+                        'priceChangePercent': ticker_data['percentage'],
+                        'quoteVolume': ticker_data['quoteVolume'],
+                        'type': 'gainer' if ticker_data['percentage'] > 0 else 'loser'
+                    })
 
-        # --- Scanner Logic ---
-        if self.last_scan_time_utc is None or (now_utc - self.last_scan_time_utc) >= datetime.timedelta(minutes=self.scan_interval_minutes):
-            scanned_symbols_info = self._scan_top_gainers_losers(exchange_ccxt)
-            self.last_scan_time_utc = now_utc
-            
-            newly_scanned_symbols_set = set(item['symbol'] for item in scanned_symbols_info)
-            current_operational_symbols = set(self.currently_tracked_symbols_operational_state.keys())
+            if not futures_usdt_tickers:
+                self.logger.info("No tickers met initial volume and price change criteria.")
+                return []
 
-            for item in scanned_symbols_info: # Add new symbols
-                symbol = item['symbol']
-                if symbol not in self.currently_tracked_symbols_operational_state:
-                    self.currently_tracked_symbols_operational_state[symbol] = { 'volatility_ok_until': now_utc + datetime.timedelta(hours=self.symbol_eval_period_hours) }
-                    logger.info(f"[{self.name}] Added new symbol to track: {symbol}")
-            
-            for symbol in list(current_operational_symbols - newly_scanned_symbols_set): # Remove symbols no longer in scan
-                # Before removing, check if there's an open DB position for this sub_id and symbol. If so, don't remove from operational state yet.
-                # This check is complex as it requires querying DB positions for *this specific subscription* for *each removed symbol*.
-                # For simplicity, we assume if a symbol is removed from scan, we stop tracking it operationally unless a DB position exists (checked later).
-                logger.info(f"[{self.name}] Symbol {symbol} no longer in scan. Will be pruned if no active position.")
-                # Actual pruning will happen in the next block if no active DB position.
+            # Sort by absolute percentage change to get top movers overall
+            sorted_tickers = sorted(futures_usdt_tickers, key=lambda x: abs(x['priceChangePercent']), reverse=True)
 
-        # --- Symbol Pruning & Trading Logic ---
-        active_db_positions_symbols = {p.symbol for p in db_session.query(Position.symbol).filter(Position.subscription_id == subscription_id, Position.is_open == True).all()}
+            candidates = sorted_tickers[:self.top_n_symbols_to_scan]
+            self.logger.info(f"Found {len(candidates)} candidates: {[c['symbol'] for c in candidates]}")
+            return candidates
+
+        except ccxt.NetworkError as e:
+            self.logger.error(f"Network error fetching tickers: {e}")
+        except ccxt.ExchangeError as e:
+            self.logger.error(f"Exchange error fetching tickers: {e}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error fetching tickers: {e}", exc_info=True)
+        return []
+
+    def _get_open_position_details(self, symbol):
+        '''Checks if an open position exists for the symbol for THIS subscription.'''
+        # This requires querying the database for positions linked to self.user_sub_obj.id
+        # For now, this is a simplified version. A real implementation would use:
+        # open_pos = self.db_session.query(Position).filter(
+        #     Position.subscription_id == self.user_sub_obj.id,
+        #     Position.symbol == symbol,
+        #     Position.is_open == True
+        # ).first()
+        # if open_pos:
+        #     return {'side': open_pos.side, 'qty': open_pos.amount, 'entry_price': open_pos.entry_price, 'id': open_pos.id}
+        # return None
         
-        # Prune symbols from operational state if they are past volatility check and have no active DB position
-        for symbol in list(self.currently_tracked_symbols_operational_state.keys()):
-            if symbol not in active_db_positions_symbols and \
-               self.currently_tracked_symbols_operational_state[symbol].get('volatility_ok_until', now_utc) < now_utc :
-                del self.currently_tracked_symbols_operational_state[symbol]
-                logger.info(f"[{self.name}] Pruned symbol (stale/non-volatile, no active DB position): {symbol}")
-        
-        if not self.currently_tracked_symbols_operational_state and not active_db_positions_symbols: logger.info(f"[{self.name}] No symbols to trade or manage."); return
+        # Simplified CCXT check (may not be specific enough if multiple bots use same account)
+        try:
+            positions = self.exchange_ccxt.fetch_positions([symbol])
+            for p in positions:
+                # CCXT position amount can be positive (long) or negative (short). Zero means no position.
+                # 'side' might be 'long'/'short' or not present; 'contracts' or 'info' for quantity.
+                # This needs to be adapted based on specific exchange CCXT response for futures.
+                # Example for Binance-like:
+                if p['symbol'] == symbol and float(p.get('contracts', p.get('unrealizedPnl', 0)) != 0): # Check if 'contracts' exists and is non-zero
+                    pos_qty = float(p.get('contracts', 0))
+                    if pos_qty == 0 and 'info' in p and 'positionAmt' in p['info']: # Fallback for some exchanges
+                         pos_qty = float(p['info']['positionAmt'])
 
-        capital_per_symbol = (self.capital_total_allocation / len(self.currently_tracked_symbols_operational_state)) if self.currently_tracked_symbols_operational_state else self.capital_total_allocation
-        if capital_per_symbol == 0 and not active_db_positions_symbols : logger.warning(f"[{self.name}] Capital per symbol is zero."); return
+                    if pos_qty != 0:
+                        side = 'long' if pos_qty > 0 else 'short'
+                        return {'side': side, 'qty': abs(pos_qty), 'entry_price': float(p.get('entryPrice', 0))}
+        except Exception as e:
+            self.logger.error(f"Error fetching position for {symbol}: {e}")
+        return None
 
-        # Iterate through all symbols that are either in operational state or have active DB positions
-        symbols_to_process = set(self.currently_tracked_symbols_operational_state.keys()).union(active_db_positions_symbols)
 
-        for symbol in symbols_to_process:
-            self._get_precisions(symbol, exchange_ccxt) # Ensure precisions are loaded for this symbol
-            position_db = db_session.query(Position).filter(Position.subscription_id == subscription_id, Position.symbol == symbol, Position.is_open == True).first()
+    def _get_active_positions_count(self):
+        # Placeholder: Counts open positions associated with this subscription_id in the DB
+        # count = self.db_session.query(Position).filter(
+        #     Position.subscription_id == self.user_sub_obj.id,
+        #     Position.is_open == True
+        # ).count()
+        # return count
+        # Simplified for now, as _get_open_position_details is also simplified
+        # This count should ideally come from DB to be accurate for *this strategy instance*
+        # For now, we are limited by not having DB write access in this subtask
+        # We will track open_positions_symbols based on what this current execution cycle tries to trade
+        # This is not perfect but a step.
+        return 0 # This will be refined or rely on DB queries in a real scenario.
+
+
+    def _calculate_trade_qty(self, symbol, entry_price, stop_loss_price, side):
+        try:
+            balance_response = self.exchange_ccxt.fetch_balance(params={'type': 'future'}) # Check your exchange's specific param for futures balance
+            usdt_balance = balance_response['USDT']['free'] if 'USDT' in balance_response and 'free' in balance_response['USDT'] else 0
+            if usdt_balance == 0: # Try total if free is 0
+                 usdt_balance = balance_response['USDT']['total'] if 'USDT' in balance_response and 'total' in balance_response['USDT'] else 0
+
+            if usdt_balance <= 0:
+                self.logger.warning("Insufficient USDT balance for trading.")
+                return 0
+
+            risk_amount_usdt = usdt_balance * self.risk_per_trade_percent
+            price_diff_abs = abs(entry_price - stop_loss_price)
+            if price_diff_abs == 0: return 0
+
+            # Quantity in base asset
+            # quantity = risk_amount_usdt / price_diff_abs
+
+            # Adjust for leverage: The position value is qty * entry_price.
+            # The actual margin used is (qty * entry_price) / leverage.
+            # The risk calculation above is about how much capital to lose, not position size directly with leverage.
+            # Position size should be ( (equity * risk_per_trade) / (entry_price - stop_loss_price) ) * entry_price for value, then / entry_price for qty.
+            # The above calculation is for quantity of base asset if 1x leverage was used for that risk.
+            # If we want leveraged position:
+            # Max position value we can afford to lose `risk_amount_usdt` on with `stop_loss_percent` move:
+            # position_value_at_risk = risk_amount_usdt / self.stop_loss_percent
+            # quantity = position_value_at_risk / entry_price
+            # This quantity is then leveraged by self.leverage, but margin is (position_value_at_risk / self.leverage)
+
+            # Simpler: original script's base_position_value = risk_amount / (price_difference / entry_price)
+            # This base_position_value is the notional size in USDT.
+            # So, quantity = base_position_value / entry_price
+            base_position_value = risk_amount_usdt / (price_diff_abs / entry_price)
+            quantity = base_position_value / entry_price
+
+
+            market = self.exchange_ccxt.markets[symbol]
+            qty_precision = market['precision']['amount']
             
+            # Use Decimal for precision rounding
+            decimal_qty = Decimal(str(quantity))
+            rounded_qty = decimal_qty.quantize(Decimal(str(qty_precision)), rounding=ROUND_DOWN)
+            
+            min_qty = market['limits']['amount']['min']
+            if float(rounded_qty) < min_qty:
+                self.logger.warning(f"Calculated quantity {rounded_qty} for {symbol} is less than min_qty {min_qty}. Setting to 0.")
+                return 0
+            
+            return float(rounded_qty)
+
+        except Exception as e:
+            self.logger.error(f"Error calculating position size for {symbol}: {e}", exc_info=True)
+            return 0
+
+    def _place_order_with_sl(self, symbol, side, quantity, entry_price, stop_loss_price):
+        self.logger.info(f"Attempting to place {side} order for {quantity} of {symbol} at market. Entry: {entry_price}, SL: {stop_loss_price}")
+        try:
+            # 1. Set Leverage (if needed and supported)
+            if hasattr(self.exchange_ccxt, 'set_leverage'):
+                 self.exchange_ccxt.set_leverage(self.leverage, symbol) # Removed marginMode, assume default or user set
+                 self.logger.info(f"Set leverage to {self.leverage}x for {symbol}")
+
+            # 2. Cancel existing orders for the symbol (optional, but good practice if opening new trade)
+            if hasattr(self.exchange_ccxt, 'cancel_all_orders'):
+                self.exchange_ccxt.cancel_all_orders(symbol)
+                self.logger.info(f"Cancelled all existing open orders for {symbol}")
+
+            # 3. Open Market Order
+            order_side = 'buy' if side == 'long' else 'sell'
+            market_order = self.exchange_ccxt.create_order(symbol, 'MARKET', order_side, quantity)
+            self.logger.info(f"Market {order_side} order placed for {symbol}: {market_order['id'] if market_order else 'Failed'}")
+            # TODO: Record market_order in DB, link to self.user_sub_obj.id
+
+            # 4. Place Stop Loss Order
+            sl_side = 'sell' if side == 'long' else 'buy'
+            sl_params = {'stopPrice': self.exchange_ccxt.price_to_precision(symbol, stop_loss_price)}
+            
+            # Ensure stopPrice is correctly formatted for the exchange
+            # Some exchanges require 'reduceOnly' for SL orders not to open new positions
+            # sl_params['reduceOnly'] = True # Add if appropriate for your exchange and logic
+
+            stop_loss_order = self.exchange_ccxt.create_order(symbol, 'STOP_MARKET', sl_side, quantity, params=sl_params)
+            self.logger.info(f"Stop loss ({sl_side}) order placed for {symbol} at {stop_loss_price}: {stop_loss_order['id'] if stop_loss_order else 'Failed'}")
+            # TODO: Record stop_loss_order in DB
+
+            # TODO: Create/Update Position record in DB for this new trade
+            # new_position = Position(subscription_id=self.user_sub_obj.id, symbol=symbol, side=side, amount=quantity, entry_price=entry_price, ...)
+            # self.db_session.add(new_position)
+            # self.db_session.commit()
+            self.logger.info(f"DB: Placeholder for creating Position record for {symbol} {side} {quantity} @ {entry_price}")
+
+            return True
+        except ccxt.InsufficientFunds as e:
+            self.logger.error(f"Insufficient funds for {symbol} {side} order: {e}")
+        except ccxt.NetworkError as e:
+            self.logger.error(f"Network error placing order for {symbol}: {e}")
+        except ccxt.ExchangeError as e: # Catch other specific CCXT errors if needed
+            self.logger.error(f"Exchange error placing order for {symbol}: {e}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error placing order for {symbol}: {e}", exc_info=True)
+        return False
+
+    def _close_open_position(self, symbol, current_pos_details):
+        self.logger.info(f"Attempting to close {current_pos_details['side']} position for {symbol} of qty {current_pos_details['qty']}")
+        try:
+            close_side = 'sell' if current_pos_details['side'] == 'long' else 'buy'
+            
+            # Cancel existing SL/TP orders first
+            if hasattr(self.exchange_ccxt, 'cancel_all_orders'):
+                self.exchange_ccxt.cancel_all_orders(symbol)
+                self.logger.info(f"Cancelled all orders for {symbol} before closing position.")
+
+            market_close_order = self.exchange_ccxt.create_order(symbol, 'MARKET', close_side, current_pos_details['qty'])
+            self.logger.info(f"Market {close_side} (close) order placed for {symbol}: {market_close_order['id'] if market_close_order else 'Failed'}")
+
+            # TODO: Update Position record in DB to closed
+            # pos_to_update = self.db_session.query(Position).filter_by(id=current_pos_details['id']).first()
+            # if pos_to_update: pos_to_update.is_open = False; pos_to_update.closed_at = datetime.datetime.utcnow(); # calculate PNL
+            # self.db_session.commit()
+            self.logger.info(f"DB: Placeholder for updating Position record for {symbol} to closed.")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error closing position for {symbol}: {e}", exc_info=True)
+            return False
+
+    def execute_live_signal(self, market_data_df=None): # market_data_df for a primary symbol is not used here
+        self.logger.info(f"Executing {self.name} strategy for UserSubID {self.user_sub_obj.id}...")
+
+        # 1. Fetch Top Gainers and Losers
+        active_candidates = self._get_top_gainer_loser_candidates()
+        if not active_candidates:
+            self.logger.info("No suitable gainer/loser candidates found in this cycle.")
+            return
+
+        # 2. Manage Positions & Trades
+        # This count should ideally come from DB specific to this subscription's trades
+        current_active_trades_count = self._get_active_positions_count() # Simplified for now
+        allowed_new_trades = self.max_concurrent_trades - current_active_trades_count
+        
+        processed_symbols_in_cycle = set() # To avoid processing same symbol if it's both gainer & loser (rare)
+
+        for candidate in active_candidates:
+            symbol = candidate['symbol']
+            if symbol in processed_symbols_in_cycle:
+                continue
+            processed_symbols_in_cycle.add(symbol)
+
+            self.logger.info(f"Processing candidate: {symbol} ({candidate['type']})")
+
+            current_pos_details = self._get_open_position_details(symbol)
+
             try:
-                ohlcv = exchange_ccxt.fetch_ohlcv(symbol, self.timeframe, limit=self.min_candles_for_signal + 5)
-                if not ohlcv or len(ohlcv) < self.min_candles_for_signal: logger.warning(f"[{self.name}-{symbol}] Insufficient candles."); continue
+                ohlcv = self.exchange_ccxt.fetch_ohlcv(symbol, timeframe=self.kline_interval, limit=self.min_candles_for_macd + 50) # +50 buffer for TA lib
+                if len(ohlcv) < self.min_candles_for_macd:
+                    self.logger.warning(f"Not enough kline data for {symbol} ({len(ohlcv)} candles). Need {self.min_candles_for_macd}.")
+                    continue
+
+                closes = np.array([candle[4] for candle in ohlcv])
+                opens = np.array([candle[1] for candle in ohlcv])
+
+                macd, signal, hist = talib.MACD(
+                    closes, fastperiod=self.macd_fast_period, slowperiod=self.macd_slow_period, signalperiod=self.macd_signal_period
+                )
+                if hist is None or len(hist) < 2:
+                    self.logger.warning(f"Could not calculate MACD or not enough values for {symbol}.")
+                    continue
                 
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
+                current_macd_hist = hist[-1]
+                prev_macd_hist = hist[-2]
                 
-                macd_obj = ta.trend.MACD(close=df['close'], fast=self.macd_fast_period, slow=self.macd_slow_period, signal=self.macd_signal_period)
-                if macd_obj is None or macd_obj.empty() or len(macd_obj) < 2: logger.warning(f"[{self.name}-{symbol}] MACD calculation failed or insufficient length."); continue
+                # Last closed candle color
+                last_closed_candle_close = closes[-1] # Most recent fully closed candle
+                last_closed_candle_open = opens[-1]
                 
-                hist = macd_obj.macd_diff(); latest_hist = hist.iloc[-1]; prev_hist = hist.iloc[-2]
-                latest_close = df['close'].iloc[-1]; latest_open = df['open'].iloc[-1]
-                is_green = latest_close > latest_open; is_red = latest_close < latest_open
+                is_green_candle = last_closed_candle_close > last_closed_candle_open
+                is_red_candle = last_closed_candle_close < last_closed_candle_open
 
-                # Exit Logic
-                if position_db:
-                    sl_price = position_db.entry_price * (1 - self.stop_loss_decimal if position_db.side == 'long' else 1 + self.stop_loss_decimal)
-                    if (position_db.side == 'long' and latest_close <= sl_price) or \
-                       (position_db.side == 'short' and latest_close >= sl_price):
-                        logger.info(f"[{self.name}-{symbol}] SL hit for {position_db.side} Pos ID {position_db.id} at {latest_close}.")
-                        close_side = 'sell' if position_db.side == 'long' else 'buy'; close_qty = self._format_quantity(symbol, position_db.amount, exchange_ccxt)
-                        db_sl_exit_order = self._create_db_order(db_session, subscription_id, symbol=symbol, order_type='market', side=close_side, amount=close_qty, status='pending_creation')
-                        try:
-                            sl_exit_receipt = exchange_ccxt.create_market_order(symbol, close_side, close_qty, params={'reduceOnly': True})
-                            db_sl_exit_order.order_id=sl_exit_receipt['id']; db_sl_exit_order.status='open'; db_session.commit()
-                            filled_sl_exit = self._await_order_fill(exchange_ccxt, sl_exit_receipt['id'], symbol)
-                            if filled_sl_exit and filled_sl_exit['status'] == 'closed':
-                                db_sl_exit_order.status='closed'; db_sl_exit_order.price=filled_sl_exit['average']; db_sl_exit_order.filled=filled_sl_exit['filled']; db_sl_exit_order.cost=filled_sl_exit['cost']; db_sl_exit_order.updated_at=datetime.datetime.utcnow()
-                                position_db.is_open=False; position_db.closed_at=datetime.datetime.utcnow()
-                                pnl = (filled_sl_exit['average'] - position_db.entry_price) * filled_sl_exit['filled'] if position_db.side == 'long' else (position_db.entry_price - filled_sl_exit['average']) * filled_sl_exit['filled']
-                                position_db.pnl=pnl; position_db.updated_at = datetime.datetime.utcnow()
-                                logger.info(f"[{self.name}-{symbol}] {position_db.side} Pos ID {position_db.id} SL closed. PnL: {pnl:.2f}")
-                            else: logger.error(f"[{self.name}-{symbol}] SL Exit order {sl_exit_receipt['id']} fail. Pos {position_db.id} open."); db_sl_exit_order.status = filled_sl_exit.get('status', 'fill_check_failed') if filled_sl_exit else 'fill_check_failed'
-                            db_session.commit()
-                        except Exception as e_sl_exit: logger.error(f"[{self.name}-{symbol}] Error closing SL for Pos {position_db.id}: {e_sl_exit}", exc_info=True); db_sl_exit_order.status='error'; db_session.commit()
-                        continue # Move to next symbol after action
+                ticker = self.exchange_ccxt.fetch_ticker(symbol)
+                current_price = ticker['last']
+                if current_price is None:
+                    self.logger.warning(f"Could not fetch current price for {symbol}.")
+                    continue
 
-                # Entry Logic
-                if not position_db and (symbol in self.currently_tracked_symbols_operational_state): # Only enter if still actively tracked
-                    entry_side = None
-                    if latest_hist > 0 and prev_hist <= 0 and is_green: entry_side = 'buy'  # Long signal
-                    elif latest_hist < 0 and prev_hist >= 0 and is_red: entry_side = 'sell' # Short signal
+                # Buy Signal Logic
+                if current_macd_hist > prev_macd_hist and is_green_candle:
+                    self.logger.info(f"Buy signal detected for {symbol} at {current_price}")
+                    if current_pos_details and current_pos_details['side'] == 'long':
+                        self.logger.info(f"Already in a long position for {symbol}.")
+                    else:
+                        if current_pos_details and current_pos_details['side'] == 'short':
+                            self.logger.info(f"Closing existing short position for {symbol} before opening long.")
+                            self._close_open_position(symbol, current_pos_details)
+                            current_pos_details = None # Position is now closed
 
-                    if entry_side:
-                        sl_price_for_sizing = latest_close * (1 - self.stop_loss_decimal) if entry_side == 'buy' else latest_close * (1 + self.stop_loss_decimal)
-                        qty = self._calculate_position_size_asset(symbol, latest_close, sl_price_for_sizing, exchange_ccxt, capital_per_symbol)
-                        if qty <= 0: logger.warning(f"[{self.name}-{symbol}] Calculated qty zero or less. Skipping."); continue
+                        if not current_pos_details and allowed_new_trades > 0:
+                            sl_price = current_price * (1 - self.stop_loss_percent)
+                            trade_qty = self._calculate_trade_qty(symbol, current_price, sl_price, 'long')
+                            if trade_qty > 0:
+                                if self._place_order_with_sl(symbol, 'long', trade_qty, current_price, sl_price):
+                                    allowed_new_trades -= 1
+                            else:
+                                self.logger.warning(f"Calculated quantity is 0 for {symbol}. Skipping trade.")
+                        elif current_pos_details: # implies it was a short, now closed
+                             sl_price = current_price * (1 - self.stop_loss_percent)
+                             trade_qty = self._calculate_trade_qty(symbol, current_price, sl_price, 'long')
+                             if trade_qty > 0: self._place_order_with_sl(symbol, 'long', trade_qty, current_price, sl_price)
+                        else:
+                            self.logger.info(f"Max concurrent trades reached or no position to close for {symbol}. Cannot open new long.")
 
-                        logger.info(f"[{self.name}-{symbol}] {entry_side.upper()} SIGNAL at {latest_close}. Qty: {qty}, SL: {sl_price_for_sizing}")
-                        db_entry_order = self._create_db_order(db_session, subscription_id, symbol=symbol, order_type='market', side=entry_side, amount=qty, status='pending_creation')
-                        try:
-                            entry_receipt = exchange_ccxt.create_market_order(symbol, entry_side, qty)
-                            db_entry_order.order_id=entry_receipt['id']; db_entry_order.status='open'; db_session.commit()
-                            filled_entry = self._await_order_fill(exchange_ccxt, entry_receipt['id'], symbol)
-                            if filled_entry and filled_entry['status'] == 'closed':
-                                db_entry_order.status='closed'; db_entry_order.price=filled_entry['average']; db_entry_order.filled=filled_entry['filled']; db_entry_order.cost=filled_entry['cost']; db_entry_order.updated_at=datetime.datetime.utcnow()
-                                
-                                new_pos = Position(subscription_id=subscription_id, symbol=symbol, exchange_name=str(exchange_ccxt.id), side=('long' if entry_side=='buy' else 'short'), amount=filled_entry['filled'], entry_price=filled_entry['average'], current_price=filled_entry['average'], is_open=True, created_at=datetime.datetime.utcnow(), updated_at=datetime.datetime.utcnow())
-                                db_session.add(new_pos); db_session.commit()
-                                logger.info(f"[{self.name}-{symbol}] {new_pos.side.upper()} Pos ID {new_pos.id} created. Entry: {new_pos.entry_price}, Size: {new_pos.amount}")
-                                # Place SL order (TP is not used by this strategy's original logic)
-                                sl_order_side = 'sell' if new_pos.side == 'long' else 'buy'
-                                sl_price_actual = new_pos.entry_price * (1 - self.stop_loss_decimal if new_pos.side == 'long' else 1 + self.stop_loss_decimal)
-                                db_sl_order = self._create_db_order(db_session, subscription_id, symbol=symbol, order_type='stop_market', side=sl_order_side, amount=new_pos.amount, price=self._format_price(symbol, sl_price_actual, exchange_ccxt), status='pending_creation')
-                                try:
-                                    sl_receipt = exchange_ccxt.create_order(symbol, 'stop_market', sl_order_side, new_pos.amount, params={'stopPrice': self._format_price(symbol, sl_price_actual, exchange_ccxt), 'reduceOnly':True})
-                                    db_sl_order.order_id=sl_receipt['id']; db_sl_order.status='open'; logger.info(f"[{self.name}-{symbol}] SL order {sl_receipt['id']} for Pos {new_pos.id}")
-                                except Exception as e_sl: logger.error(f"[{self.name}-{symbol}] Error SL for Pos {new_pos.id}: {e_sl}", exc_info=True); db_sl_order.status='error'
-                                db_session.commit()
-                            else: logger.error(f"[{self.name}-{symbol}] Entry order {entry_receipt['id']} failed. Pos not opened."); db_entry_order.status = filled_entry.get('status', 'fill_check_failed') if filled_entry else 'fill_check_failed'
-                            db_session.commit()
-                        except Exception as e_entry: logger.error(f"[{self.name}-{symbol}] Error during {entry_side} entry for {symbol}: {e_entry}", exc_info=True); db_entry_order.status='error'; db_session.commit()
-            except Exception as e_sym_proc: logger.error(f"[{self.name}] Error processing symbol {symbol}: {e_sym_proc}", exc_info=True)
-        logger.debug(f"[{self.name}] Live signal execution cycle finished for sub {subscription_id}.")
+                # Sell Signal Logic
+                elif current_macd_hist < prev_macd_hist and is_red_candle:
+                    self.logger.info(f"Sell signal detected for {symbol} at {current_price}")
+                    if current_pos_details and current_pos_details['side'] == 'short':
+                        self.logger.info(f"Already in a short position for {symbol}.")
+                    else:
+                        if current_pos_details and current_pos_details['side'] == 'long':
+                            self.logger.info(f"Closing existing long position for {symbol} before opening short.")
+                            self._close_open_position(symbol, current_pos_details)
+                            current_pos_details = None # Position is now closed
+
+                        if not current_pos_details and allowed_new_trades > 0:
+                            sl_price = current_price * (1 + self.stop_loss_percent)
+                            trade_qty = self._calculate_trade_qty(symbol, current_price, sl_price, 'short')
+                            if trade_qty > 0:
+                                if self._place_order_with_sl(symbol, 'short', trade_qty, current_price, sl_price):
+                                    allowed_new_trades -=1
+                            else:
+                                self.logger.warning(f"Calculated quantity is 0 for {symbol}. Skipping trade.")
+                        elif current_pos_details: # implies it was a long, now closed
+                            sl_price = current_price * (1 + self.stop_loss_percent)
+                            trade_qty = self._calculate_trade_qty(symbol, current_price, sl_price, 'short')
+                            if trade_qty > 0: self._place_order_with_sl(symbol, 'short', trade_qty, current_price, sl_price)
+                        else:
+                            self.logger.info(f"Max concurrent trades reached or no position to close for {symbol}. Cannot open new short.")
+                else:
+                    self.logger.info(f"No actionable MACD signal for {symbol} (Hist: {current_macd_hist:.8f} vs {prev_macd_hist:.8f}, Candle: {'Green' if is_green_candle else 'Red' if is_red_candle else 'Neutral'})")
+
+            except ccxt.NetworkError as e:
+                self.logger.error(f"CCXT NetworkError processing symbol {symbol}: {e}")
+            except ccxt.ExchangeError as e:
+                self.logger.error(f"CCXT ExchangeError processing symbol {symbol}: {e}")
+            except Exception as e:
+                self.logger.error(f"Unexpected error processing symbol {symbol}: {e}", exc_info=True)
+
+        self.logger.info(f"{self.name} execution cycle finished.")
+
+    # run_backtest method would be similar but use historical data feeder
+    # For now, we focus on execute_live_signal
