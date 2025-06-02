@@ -38,6 +38,7 @@ This document provides a checklist of crucial considerations and recommendations
     - Proxy API requests to the backend (e.g., `127.0.0.1:8000` as configured in `docker-compose.prod.yml`).
     - Implement SSL/TLS for HTTPS (e.g., using Let's Encrypt).
     - Optionally, add security headers, caching rules.
+- [ ] **System Settings Configuration:** Critical backend defaults (e.g., for live strategy execution parameters like symbol/timeframe which are now mandatory, and backtesting default settings like `MAX_BACKTEST_DAYS_SYSTEM`, `DEFAULT_BACKTEST_EXCHANGE_ID`, `DEFAULT_BACKTEST_INITIAL_CAPITAL`) are now primarily managed via `SystemSetting` database entries. This reduces hardcoded fallbacks and allows for dynamic configuration via the admin panel. Ensure these are reviewed and set appropriately for the production environment.
 
 ## II. Automated Testing
 - [ ] **Write Comprehensive Tests:** The project is set up with `pytest` (`backend/tests/`). It is CRITICAL to write comprehensive automated tests:
@@ -54,6 +55,7 @@ This document provides a checklist of crucial considerations and recommendations
 - [ ] **Rate Limiting:** Implement rate limiting on API endpoints to prevent abuse.
 - [ ] **Web Application Firewall (WAF):** Consider using a WAF for an additional layer of security.
 - [ ] **Permissions & Access Control:** Ensure database users and application roles have the minimum necessary permissions.
+- [ ] **Password Reset Tokens:** Password reset tokens are now hashed in the database using the same strong hashing algorithm as user passwords, enhancing security if the database is compromised.
 
 ## IV. Monitoring & Logging
 - [ ] **Centralized Logging:** Implement centralized logging for all services (web, worker).
@@ -64,6 +66,7 @@ This document provides a checklist of crucial considerations and recommendations
     - Add `flower` to `requirements.txt` and include it in your `docker-compose.prod.yml` if desired.
 - [ ] **Infrastructure Monitoring:** Monitor CPU, memory, disk, and network usage of your servers/containers.
 - [ ] **Alerting:** Configure alerts for critical errors, performance degradation, and security events.
+- [ ] **Error Handling Refinements:** Backend error handling has been improved with more specific exception catching (e.g., for database, Celery, CCXT, payment gateway interactions) and enhanced logging detail (including tracebacks for unexpected errors), aiding in faster diagnosis and debugging.
 
 ## V. Database Management
 - [ ] **Production Database:** Use a robust production-grade PostgreSQL instance (e.g., managed cloud service like AWS RDS, Google Cloud SQL, or a self-hosted, well-configured instance).
@@ -77,5 +80,9 @@ This document provides a checklist of crucial considerations and recommendations
 - [ ] **Horizontal Scaling:** Be prepared to scale web and worker services horizontally (running more containers) based on load.
 - [ ] **Database Read Replicas:** For read-heavy workloads, consider using database read replicas.
 - [ ] **Data Redundancy & Failover:** Plan for data redundancy and service failover.
+
+## VII. Admin Panel Functionality
+- [ ] **System Settings Management:** The admin panel now supports viewing and dynamically updating database-backed system settings (e.g., `REFERRAL_COMMISSION_RATE`, `MAX_BACKTEST_DAYS_SYSTEM`, etc.), allowing for easier configuration changes without code deployments.
+- [ ] **Strategy Management:** Admin users can now toggle the `is_active` status of strategies and delete strategies directly via the admin interface (note: deleting strategies with active subscriptions is currently allowed but logged).
 
 This checklist is a starting point. Adapt and expand it based on your specific operational requirements and risk assessment.
