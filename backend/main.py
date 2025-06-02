@@ -39,10 +39,14 @@ async def startup_event():
              # Depending on desired behavior, you might raise an exception or exit
              # For now, we'll just print an error and skip table creation
         else:
-            Base.metadata.create_all(bind=global_engine)
-            print("Database tables created successfully (if they didn't exist).")
+            # Only run create_all if not in production (Alembic handles production)
+            if settings.ENVIRONMENT != "production":
+                Base.metadata.create_all(bind=global_engine)
+                print("Database tables created successfully (if they didn't exist).")
+            else:
+                print("Skipping Base.metadata.create_all in production environment (handled by Alembic).")
     except Exception as e:
-        print(f"Error creating database tables: {e}")
+        print(f"Error during startup database table check: {e}")
         # Depending on the severity, you might want to exit or handle this error.
 
 
