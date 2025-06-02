@@ -57,3 +57,12 @@ class UserPaymentHistoryResponse(BaseModel):
 class WebhookAcknowledgeResponse(BaseModel):
     status: str
     message: str
+
+class AdminPaymentStatusUpdateRequest(BaseModel):
+    new_status: str = Field(..., description="The new status for the payment transaction (e.g., 'completed', 'failed', 'pending', 'refunded', 'cancelled').")
+    status_message: Optional[str] = Field(None, description="Optional message to set for the transaction's status.")
+    admin_notes: Optional[str] = Field(None, description="Administrator notes regarding this manual update.")
+
+class GeneralExchangeResponse(BaseModel): # As suggested by the prompt for generic responses
+    status: str
+    message: str
