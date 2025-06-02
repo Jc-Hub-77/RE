@@ -8,8 +8,10 @@ import importlib.util
 import logging
 # import datetime # Already imported below, ensure only one
 from celery.result import AsyncResult
+from celery.exceptions import OperationalError as CeleryOperationalError # For Celery specific operational errors
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError # For DB errors
 import datetime # Ensure datetime is imported
 
 from backend.models import UserStrategySubscription, ApiKey, User, Strategy as StrategyModel
@@ -67,10 +69,30 @@ def deploy_strategy(db: Session, user_strategy_subscription_id: int):
         logger.info(f"Queued strategy deployment task for subscription ID: {user_strategy_subscription_id} with Task ID: {task.id}")
         return {"status": "success", "message": f"Strategy deployment task queued. Task ID: {task.id}", "task_id": task.id} # Added task_id to response
 
+    except CeleryOperationalError as coe:
+        logger.error(f"Celery OperationalError while trying to deploy subscription {user_strategy_subscription_id}: {coe}", exc_info=True)
+        # Attempt to update DB status even if Celery op fails
+        try:
+            user_sub.status_message = f"Deployment Error: Celery broker issue - {str(coe)[:100]}"
+            db.commit()
+        except SQLAlchemyError as db_exc:
+            logger.error(f"SQLAlchemyError updating status after CeleryOperationalError for sub {user_strategy_subscription_id}: {db_exc}", exc_info=True)
+            db.rollback()
+        return {"status": "error", "message": f"Celery operational error during deployment: {coe}"}
+    except SQLAlchemyError as sae:
+        logger.error(f"SQLAlchemyError during deploy_strategy for subscription {user_strategy_subscription_id}: {sae}", exc_info=True)
+        db.rollback() # Rollback on DB error
+        # user_sub might be in an inconsistent state if task was sent but commit failed.
+        # For now, we don't try to revoke if DB commit for task_id failed.
+        return {"status": "error", "message": f"Database error during deployment: {sae}"}
     except Exception as e: 
-         logger.error(f"Failed to send Celery task for subscription {user_strategy_subscription_id}: {e}", exc_info=True)
-         user_sub.status_message = f"Deployment Error: Failed to queue task - {str(e)[:100]}"
-         db.commit()
+         logger.exception(f"Unexpected error in deploy_strategy for subscription {user_strategy_subscription_id}: {e}")
+         try:
+             user_sub.status_message = f"Deployment Error: Unexpected error - {str(e)[:100]}"
+             db.commit()
+         except SQLAlchemyError as db_exc:
+             logger.error(f"SQLAlchemyError updating status after unexpected error for sub {user_strategy_subscription_id}: {db_exc}", exc_info=True)
+             db.rollback()
          return {"status": "error", "message": f"Internal server error during deployment: {e}"}
 
 
@@ -96,10 +118,28 @@ def stop_strategy(db: Session, user_strategy_subscription_id: int):
             user_sub.celery_task_id = None 
             db.commit()
             return {"status": "success", "message": message}
+        except CeleryOperationalError as coe:
+            logger.error(f"Celery OperationalError while trying to stop task {celery_task_id} for sub {user_strategy_subscription_id}: {coe}", exc_info=True)
+            # Attempt to update DB status
+            try:
+                user_sub.status_message = f"Stop Error: Celery broker issue - {str(coe)[:100]}"
+                db.commit()
+            except SQLAlchemyError as db_exc:
+                logger.error(f"SQLAlchemyError updating status after CeleryOperationalError during stop for sub {user_strategy_subscription_id}: {db_exc}", exc_info=True)
+                db.rollback()
+            return {"status": "error", "message": f"Celery operational error while stopping task: {coe}"}
+        except SQLAlchemyError as sae:
+            logger.error(f"SQLAlchemyError during stop_strategy for sub {user_strategy_subscription_id}, task {celery_task_id}: {sae}", exc_info=True)
+            db.rollback()
+            return {"status": "error", "message": f"Database error while stopping task: {sae}"}
         except Exception as e:
-            logger.error(f"Failed to send revoke signal for task {celery_task_id}: {e}", exc_info=True)
-            user_sub.status_message = f"Stop Error: Failed to revoke task - {str(e)[:100]}"
-            db.commit()
+            logger.exception(f"Unexpected error in stop_strategy for task {celery_task_id}, sub {user_strategy_subscription_id}: {e}")
+            try:
+                user_sub.status_message = f"Stop Error: Unexpected error - {str(e)[:100]}"
+                db.commit()
+            except SQLAlchemyError as db_exc:
+                logger.error(f"SQLAlchemyError updating status after unexpected error during stop for sub {user_strategy_subscription_id}: {db_exc}", exc_info=True)
+                db.rollback()
             return {"status": "error", "message": f"Failed to stop strategy task: {e}"}
     else:
         user_sub.is_active = False
@@ -173,15 +213,60 @@ def restart_strategy_admin(db: Session, user_strategy_subscription_id: int):
     return {"status": "success", "message": final_message, "task_id": deploy_result.get("task_id")}
 
 
-def get_running_strategies_status(): # Same as original
-    logger.info("Fetching running strategy statuses from Celery backend (placeholder)...")
+def get_running_strategies_status(db: Session):
+    """
+    Retrieves the status of all active strategy subscriptions that have a Celery task ID.
+    """
+    logger.info("Fetching status of running strategies...")
+    
+    active_subscriptions_with_tasks = db.query(UserStrategySubscription).filter(
+        UserStrategySubscription.is_active == True,
+        UserStrategySubscription.celery_task_id != None
+    ).all()
+
     statuses = []
-    try:
-        statuses.append({"message": "Status retrieval from Celery backend is a TODO.", "detail": "Implement querying Celery inspect API or rely on DB status."})
-    except Exception as e:
-        logger.error(f"Error fetching running strategy statuses from Celery: {e}", exc_info=True)
-        statuses.append({"message": "Error fetching status from Celery.", "detail": str(e)})
-    return {"status": "info", "running_strategies": statuses}
+    if not active_subscriptions_with_tasks:
+        logger.info("No active subscriptions with Celery tasks found.")
+        return {"status": "success", "running_strategies": [], "message": "No active strategies with tasks."}
+
+    for sub in active_subscriptions_with_tasks:
+        try:
+            task = AsyncResult(sub.celery_task_id, app=celery_app)
+            strategy_name = sub.strategy.name if sub.strategy else "Unknown Strategy"
+            
+            status_info = {
+                "subscription_id": sub.id,
+                "user_id": sub.user_id,
+                "strategy_id": sub.strategy_id,
+                "strategy_name": strategy_name,
+                "celery_task_id": sub.celery_task_id,
+                "task_status": task.state,
+                "task_info": task.info if isinstance(task.info, dict) else str(task.info), # Ensure info is serializable
+                "db_status_message": sub.status_message,
+                "last_updated_db": sub.updated_at.isoformat() if sub.updated_at.isoformat() else None,
+            }
+            statuses.append(status_info)
+            logger.debug(f"Status for Sub ID {sub.id} ('{strategy_name}'): Task ID {sub.celery_task_id}, State: {task.state}")
+        except CeleryOperationalError as coe:
+            logger.error(f"Celery OperationalError fetching status for task {sub.celery_task_id} (Sub ID {sub.id}): {coe}", exc_info=True)
+            statuses.append({
+                "subscription_id": sub.id, "strategy_name": sub.strategy.name if sub.strategy else "Unknown Strategy",
+                "celery_task_id": sub.celery_task_id, "task_status": "UNKNOWN_CELERY_ERROR",
+                "task_info": f"Could not fetch status from Celery: {coe}",
+                "db_status_message": sub.status_message, "last_updated_db": sub.updated_at.isoformat() if sub.updated_at else None,
+            })
+        except Exception as e:
+            logger.exception(f"Unexpected error fetching status for task {sub.celery_task_id} (Sub ID {sub.id}): {e}")
+            statuses.append({
+                "subscription_id": sub.id, "strategy_name": sub.strategy.name if sub.strategy else "Unknown Strategy",
+                "celery_task_id": sub.celery_task_id, "task_status": "UNKNOWN_ERROR",
+                "task_info": f"Unexpected error fetching status: {e}",
+                "db_status_message": sub.status_message, "last_updated_db": sub.updated_at.isoformat() if sub.updated_at else None,
+            })
+
+
+    logger.info(f"Successfully fetched status for {len(statuses)} running strategies.")
+    return {"status": "success", "running_strategies": statuses}
 
 
 def auto_stop_expired_subscriptions(db: Session): # Same as original

@@ -211,11 +211,12 @@ async def reset_password_endpoint( # Changed name
     db: Session = Depends(get_db)
 ):
     """
-    Resets the user's password using a valid token.
+    Resets the user's password using a valid token and email.
     """
-    result = user_service.reset_password_with_token( # Corrected call
+    result = user_service.reset_password_with_token(
         db_session=db,
-        token=reset_data.token,
+        email=reset_data.email, # Pass email from the updated schema
+        plain_token=reset_data.token, # This is the plain token from the user
         new_password=reset_data.new_password
     )
     if result["status"] == "error":

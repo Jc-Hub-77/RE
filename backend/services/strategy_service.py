@@ -14,6 +14,7 @@ from backend.services import live_trading_service
 from backend.utils import _load_strategy_class_from_db_obj # Import from utils
 from backend.schemas.strategy_schemas import PaymentOption
 from typing import Optional, List, Dict, Any
+from fastapi import HTTPException # Added for parameter validation, though will return dict for consistency
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -127,6 +128,30 @@ def create_or_update_strategy_subscription(db_session: Session, user_id: int, st
     if api_key.status != "active": 
         logger.warning(f"API key (ID: {api_key_id}) is not active for user {user_id}.")
         return {"status": "error", "message": "Selected API key is not active."}
+
+    # Validate custom_parameters before creating/updating subscription
+    StrategyClass = _load_strategy_class_from_db_obj(strategy_db_obj)
+    if not StrategyClass: # Should have been caught earlier, but double check
+        return {"status": "error", "message": f"Could not load strategy class for '{strategy_db_obj.name}'."}
+
+    if hasattr(StrategyClass, 'validate_parameters') and callable(getattr(StrategyClass, 'validate_parameters')):
+        try:
+            is_valid = getattr(StrategyClass, 'validate_parameters')(custom_parameters)
+            if is_valid is False: # Explicitly check for False if it can return boolean
+                logger.warning(f"Subscription creation/update: Validation failed for strategy {strategy_db_obj.name} with params: {custom_parameters}")
+                return {"status": "error", "message": "Invalid parameters for this strategy according to its validation logic."}
+        except ValueError as ve: # Catch specific validation errors from strategy
+            logger.warning(f"Subscription creation/update: Parameter validation error for strategy {strategy_db_obj.name}: {ve}")
+            return {"status": "error", "message": f"Invalid parameters: {ve}"}
+        except Exception as e:
+            logger.error(f"Subscription creation/update: Unexpected error during parameter validation for strategy {strategy_db_obj.name}: {e}", exc_info=True)
+            return {"status": "error", "message": "An unexpected error occurred during parameter validation."}
+    else:
+        # If no 'validate_parameters' method, check against default_parameters from DB if they exist and are structured for validation
+        # For now, we'll just log if no specific validator is present on the strategy class.
+        # More advanced: Could compare keys, types against strategy_db_obj.default_parameters (parsed JSON)
+        logger.info(f"Strategy {strategy_db_obj.name} has no 'validate_parameters' method. Proceeding with provided custom_parameters.")
+
 
     existing_sub = db_session.query(UserStrategySubscription).filter(
         UserStrategySubscription.user_id == user_id,

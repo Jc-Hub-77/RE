@@ -9,17 +9,16 @@ import numpy as np  # For numerical operations
 import logging
 
 from backend.models import BacktestResult, Strategy as StrategyModel
-from backend.utils import _load_strategy_class_from_db_obj # Import from utils
+from backend.utils import _load_strategy_class_from_db_obj, get_system_setting # Import from utils
 from backend.services.exchange_service import fetch_historical_data
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError # Added for DB errors
 from backend.celery_app import celery_app # Import celery app
 from backend.tasks import run_backtest_task # Import the Celery task
 
-# --- Configuration ---
-MAX_BACKTEST_DAYS = 366 # Maximum backtest period allowed (e.g., 1 year)
-
 # Initialize logger
 logger = logging.getLogger(__name__)
+# MAX_BACKTEST_DAYS is now fetched dynamically
 
 # --- Core Backtesting Logic (Helper Function) ---
 def _perform_backtest_logic(db_session: Session,
@@ -31,8 +30,8 @@ def _perform_backtest_logic(db_session: Session,
                             timeframe: str,
                             start_date_str: str,
                             end_date_str: str,
-                            initial_capital: float = 10000.0,
-                            exchange_id: str = 'binance'
+                            initial_capital: float, # Default removed, will be passed by run_backtest
+                            exchange_id: str # Default removed, will be passed by run_backtest
                            ):
     """
     Performs the core backtesting logic. Designed to be called by a Celery task.
@@ -57,11 +56,19 @@ def _perform_backtest_logic(db_session: Session,
         db_session.commit()
         return {"status": "error", "message": "Invalid date format."}
 
-    if (end_date - start_date).days > MAX_BACKTEST_DAYS:
-        logger.error(f"Backtest period exceeds max allowed days ({MAX_BACKTEST_DAYS}): {start_date_str} to {end_date_str}")
+    # Fetch MAX_BACKTEST_DAYS from system settings
+    max_days_str = get_system_setting(db_session, "MAX_BACKTEST_DAYS_SYSTEM", str(366))
+    try:
+        current_max_backtest_days = int(max_days_str)
+    except ValueError:
+        logger.warning(f"Could not parse MAX_BACKTEST_DAYS_SYSTEM ('{max_days_str}') from SystemSetting. Using default 366.")
+        current_max_backtest_days = 366
+
+    if (end_date - start_date).days > current_max_backtest_days:
+        logger.error(f"Backtest period exceeds max allowed days ({current_max_backtest_days}): {start_date_str} to {end_date_str}")
         backtest_record.status = "failed"
         db_session.commit()
-        return {"status": "error", "message": f"Backtest period cannot exceed {MAX_BACKTEST_DAYS} days."}
+        return {"status": "error", "message": f"Backtest period cannot exceed {current_max_backtest_days} days."}
     if start_date >= end_date:
         logger.error(f"Start date is not before end date: {start_date_str} to {end_date_str}")
         backtest_record.status = "failed"
@@ -96,9 +103,10 @@ def _perform_backtest_logic(db_session: Session,
             backtest_record.status = "no_data" # Use 'no_data' status
             db_session.commit()
             return {"status": "error", "message": "No historical data found for the given parameters."}
-    except Exception as e:
-        logger.error(f"Failed to fetch historical data for backtest: {e}", exc_info=True)
+    except Exception as e: # fetch_historical_data has its own error handling, this is a fallback
+        logger.exception(f"Unexpected error calling fetch_historical_data for backtest BR_ID {backtest_result_id}: {e}")
         backtest_record.status = "failed"
+        backtest_record.status_message = f"Data Fetch Error: {str(e)[:150]}"
         db_session.commit()
         return {"status": "error", "message": f"Failed to fetch historical data: {str(e)}"}
 
@@ -112,8 +120,9 @@ def _perform_backtest_logic(db_session: Session,
     try:
         strategy_instance = StrategyClass(**strategy_params)
     except Exception as e:
-        logger.error(f"Error initializing strategy '{strategy_db_obj.name}' (ID: {strategy_id}) for backtest: {e}", exc_info=True)
+        logger.exception(f"Error initializing strategy '{strategy_db_obj.name}' (ID: {strategy_id}) for backtest BR_ID {backtest_result_id}: {e}")
         backtest_record.status = "failed"
+        backtest_record.status_message = f"Strategy Init Error: {str(e)[:150]}"
         db_session.commit()
         return {"status": "error", "message": f"Error initializing strategy: {str(e)}"}
 
@@ -121,8 +130,9 @@ def _perform_backtest_logic(db_session: Session,
     try:
         backtest_output = strategy_instance.run_backtest(historical_df)
     except Exception as e:
-        logger.error(f"Error during strategy's run_backtest method for '{strategy_db_obj.name}' (ID: {strategy_id}): {e}", exc_info=True)
+        logger.exception(f"Error during strategy's run_backtest method for '{strategy_db_obj.name}' (ID: {strategy_id}), BR_ID {backtest_result_id}: {e}")
         backtest_record.status = "failed"
+        backtest_record.status_message = f"Strategy Execution Error: {str(e)[:150]}"
         db_session.commit()
         return {"status": "error", "message": f"Error executing strategy backtest: {str(e)}"}
 
@@ -183,12 +193,28 @@ def _perform_backtest_logic(db_session: Session,
             "backtest_id": backtest_record.id,
             # Include other summary data if needed by the task result
         }
-    except Exception as e:
+    except SQLAlchemyError as sae:
         db_session.rollback()
-        logger.error(f"Error updating backtest results for ID {backtest_record.id}: {e}", exc_info=True)
-        backtest_record.status = "failed" # Set status to failed on error
-        db_session.commit()
+        logger.exception(f"SQLAlchemyError updating backtest results for BR_ID {backtest_record.id}: {sae}")
+        # Attempt to update status to failed, but this might also fail if DB is down
+        try:
+            backtest_record.status = "failed" 
+            backtest_record.status_message = f"DB Error Saving Results: {str(sae)[:100]}"
+            db_session.commit()
+        except Exception: # Re-rollback if status update fails
+            db_session.rollback()
         return {"status": "error", "message": "Database error updating backtest results."}
+    except Exception as e: # General fallback for unexpected errors during result processing/commit
+        db_session.rollback()
+        logger.exception(f"Unexpected error updating backtest results for BR_ID {backtest_record.id}: {e}")
+        try:
+            backtest_record.status = "failed"
+            backtest_record.status_message = f"Unexpected Error Saving Results: {str(e)[:100]}"
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+        return {"status": "error", "message": "Unexpected error updating backtest results."}
+
 
 # --- Service Function to Queue Backtest ---
 def run_backtest(db_session: Session, # Use DB session directly
@@ -199,8 +225,8 @@ def run_backtest(db_session: Session, # Use DB session directly
                  timeframe: str,
                  start_date_str: str,
                  end_date_str: str,
-                 initial_capital: float = 10000.0,
-                 exchange_id: str = 'binance'
+                 initial_capital: Optional[float] = None,
+                 exchange_id: Optional[str] = None
                 ):
     """
     Queues a backtest task to be run by a Celery worker.
@@ -213,10 +239,33 @@ def run_backtest(db_session: Session, # Use DB session directly
     except ValueError:
         return {"status": "error", "message": "Invalid date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)."}
 
-    if (end_date - start_date).days > MAX_BACKTEST_DAYS:
-        return {"status": "error", "message": f"Backtest period cannot exceed {MAX_BACKTEST_DAYS} days."}
+    # Fetch MAX_BACKTEST_DAYS from system settings
+    max_days_str = get_system_setting(db_session, "MAX_BACKTEST_DAYS_SYSTEM", str(366))
+    try:
+        current_max_backtest_days = int(max_days_str)
+    except ValueError:
+        logger.warning(f"Could not parse MAX_BACKTEST_DAYS_SYSTEM ('{max_days_str}') from SystemSetting for pre-queue check. Using default 366.")
+        current_max_backtest_days = 366
+
+    if (end_date - start_date).days > current_max_backtest_days:
+        return {"status": "error", "message": f"Backtest period cannot exceed {current_max_backtest_days} days."}
     if start_date >= end_date:
         return {"status": "error", "message": "Start date must be before end date."}
+
+    # Get dynamic defaults for initial_capital and exchange_id
+    final_initial_capital = initial_capital
+    if final_initial_capital is None:
+        try:
+            default_initial_capital_str = get_system_setting(db_session, "DEFAULT_BACKTEST_INITIAL_CAPITAL", "10000.0")
+            final_initial_capital = float(default_initial_capital_str)
+        except ValueError:
+            logger.warning(f"Could not parse DEFAULT_BACKTEST_INITIAL_CAPITAL ('{default_initial_capital_str}') from SystemSetting. Using hardcoded default 10000.0.")
+            final_initial_capital = 10000.0
+    
+    final_exchange_id = exchange_id
+    if final_exchange_id is None:
+        final_exchange_id = get_system_setting(db_session, "DEFAULT_BACKTEST_EXCHANGE_ID", "binance")
+
 
     # Create a BacktestResult record in the DB with status 'queued'
     backtest_record = BacktestResult(
@@ -244,8 +293,8 @@ def run_backtest(db_session: Session, # Use DB session directly
             timeframe=timeframe,
             start_date_str=start_date_str,
             end_date_str=end_date_str,
-            initial_capital=initial_capital,
-            exchange_id=exchange_id
+            initial_capital=final_initial_capital,
+            exchange_id=final_exchange_id
         )
         logger.info(f"Queued backtest task for user {user_id}, strategy {strategy_id}. Task ID: {task.id}")
 
@@ -254,13 +303,17 @@ def run_backtest(db_session: Session, # Use DB session directly
         db_session.commit()
 
         return {"status": "success", "message": "Backtest task queued.", "backtest_id": backtest_record.id, "task_id": task.id}
-
-    except Exception as e:
-        db_session.rollback() # Rollback the initial record creation if task queuing fails
-        logger.error(f"Failed to queue backtest task for user {user_id}, strategy {strategy_id}: {e}", exc_info=True)
-        # Update the BacktestResult record status to 'failed_to_queue'
-        backtest_record.status = "failed_to_queue"
-        db_session.commit()
+    except CeleryOperationalError as coe: # More specific error for Celery
+        db_session.rollback() 
+        logger.error(f"Celery OperationalError queuing backtest task for user {user_id}, strategy {strategy_id}: {coe}", exc_info=True)
+        backtest_record.status = "failed_to_queue"; backtest_record.status_message = f"Celery Error: {str(coe)[:100]}"
+        db_session.commit() # Try to commit status update
+        return {"status": "error", "message": f"Failed to queue backtest task due to Celery operational error: {coe}"}
+    except Exception as e: # General fallback
+        db_session.rollback() 
+        logger.exception(f"Unexpected error queuing backtest task for user {user_id}, strategy {strategy_id}: {e}")
+        backtest_record.status = "failed_to_queue"; backtest_record.status_message = f"Queueing Error: {str(e)[:100]}"
+        db_session.commit() # Try to commit status update
         return {"status": "error", "message": f"Failed to queue backtest task: {e}"}
 
 # Note: The _load_strategy_class helper function is assumed to be defined elsewhere or needs to be added.

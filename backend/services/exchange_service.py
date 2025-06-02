@@ -10,6 +10,7 @@ import pandas as pd # Added for fetch_historical_data
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError # For DB errors
 from backend.models import ApiKey, User, UserStrategySubscription # Added UserStrategySubscription
 from backend.config import settings 
 
@@ -65,8 +66,8 @@ def add_exchange_api_key(db_session: Session, user_id: int, exchange_name: str,
         encrypted_api_key_val = _encrypt_data(api_key_public)
         encrypted_secret_val = _encrypt_data(secret_key)
         encrypted_passphrase_val = _encrypt_data(passphrase) if passphrase else None
-    except ValueError as e:
-        logger.error(f"Encryption error during add_exchange_api_key: {e}", exc_info=True)
+    except ValueError as e: # This is raised by _encrypt_data if cipher_suite is None or by Fernet itself
+        logger.exception(f"Encryption error during add_exchange_api_key for user {user_id}: {e}")
         return {"status": "error", "message": f"Encryption error: {e}"}
 
     api_key_preview = api_key_public[:4] + "..." + api_key_public[-4:] if len(api_key_public) > 8 else api_key_public
@@ -93,10 +94,14 @@ def add_exchange_api_key(db_session: Session, user_id: int, exchange_name: str,
             "message": f"API key for {exchange_name} added with label '{effective_label}'. Please test connectivity.",
             "api_key_id": new_api_key_entry.id
         }
-    except Exception as e:
+    except SQLAlchemyError as e:
         db_session.rollback()
-        logger.error(f"Error adding API key to DB: {e}", exc_info=True)
+        logger.exception(f"SQLAlchemyError adding API key to DB for user {user_id}: {e}")
         return {"status": "error", "message": "Database error while adding API key."}
+    except Exception as e: # Catch any other unexpected errors
+        db_session.rollback()
+        logger.exception(f"Unexpected error adding API key to DB for user {user_id}: {e}")
+        return {"status": "error", "message": "An unexpected error occurred while adding API key."}
 
 def get_user_exchange_api_keys_display(db_session: Session, user_id: int):
     api_keys_query = db_session.query(ApiKey).filter(ApiKey.user_id == user_id).order_by(ApiKey.label).all()
@@ -132,10 +137,14 @@ def remove_exchange_api_key(db_session: Session, user_id: int, api_key_id: int):
         db_session.commit()
         logger.info(f"API Key ID {api_key_id} for user {user_id} removed successfully.")
         return {"status": "success", "message": "API key removed successfully."}
-    except Exception as e:
+    except SQLAlchemyError as e:
         db_session.rollback()
-        logger.error(f"Error removing API key {api_key_id} for user {user_id}: {e}", exc_info=True)
+        logger.exception(f"SQLAlchemyError removing API key {api_key_id} for user {user_id}: {e}")
         return {"status": "error", "message": "Database error while removing API key."}
+    except Exception as e: # Catch any other unexpected errors
+        db_session.rollback()
+        logger.exception(f"Unexpected error removing API key {api_key_id} for user {user_id}: {e}")
+        return {"status": "error", "message": "An unexpected error occurred while removing API key."}
 
 def test_api_connectivity(db_session: Session, user_id: int, api_key_id: int):
     key_entry = db_session.query(ApiKey).filter(ApiKey.id == api_key_id, ApiKey.user_id == user_id).first()
@@ -160,7 +169,12 @@ def test_api_connectivity(db_session: Session, user_id: int, api_key_id: int):
     except ValueError as e:
         key_entry.status = "error_decryption"
         key_entry.status_message = f"API key decryption failed: {e}. Please re-add the key."
-        db_session.commit()
+        try:
+            db_session.commit()
+        except SQLAlchemyError as db_e:
+            logger.exception(f"SQLAlchemyError committing decryption failure status for API key {api_key_id}: {db_e}")
+            db_session.rollback()
+            # Fall through to return the original decryption error message
         return {"status": key_entry.status, "message": key_entry.status_message}
     
     exchange_name_lower = key_entry.exchange_name.lower()
@@ -194,16 +208,22 @@ def test_api_connectivity(db_session: Session, user_id: int, api_key_id: int):
     except ccxt.ExchangeError as e: 
         key_entry.status = "error_exchange"
         key_entry.status_message = f"Exchange error: {str(e)}."
-    except Exception as e: 
+    except Exception as e: # General fallback for unexpected errors during CCXT test
+        logger.exception(f"Unexpected error during API connectivity test for key ID {api_key_id} (User {user_id}): {e}")
         key_entry.status = "error_unknown"
         key_entry.status_message = f"An unexpected error occurred: {str(e)}."
     
     try:
         db_session.commit()
-    except Exception as e_db:
+    except SQLAlchemyError as e_db:
         db_session.rollback()
-        logger.error(f"DB error updating API key {api_key_id} status after test: {e_db}", exc_info=True)
+        logger.exception(f"SQLAlchemyError updating API key {api_key_id} status after test: {e_db}")
+        # Return the status determined by the test, but append DB error info
         return {"status": key_entry.status, "message": key_entry.status_message + f" (DB status update failed: {e_db})"}
+    except Exception as e_db_unexpected: # Catch any other unexpected errors during commit
+        db_session.rollback()
+        logger.exception(f"Unexpected error updating API key {api_key_id} status after test: {e_db_unexpected}")
+        return {"status": key_entry.status, "message": key_entry.status_message + f" (Unexpected DB status update error: {e_db_unexpected})"}
         
     return {"status": key_entry.status, "message": key_entry.status_message, "api_key_id": key_entry.id}
 
@@ -237,8 +257,11 @@ def get_exchange_client(db_session: Session, api_key_id: int, user_id: int) -> O
     try:
         client = exchange_class(config)
         return client
-    except Exception as e:
-        logger.error(f"Failed to initialize CCXT client for {exchange_name_lower} with API key ID {api_key_id}: {e}", exc_info=True)
+    except ccxt.BaseError as be: # Catch specific CCXT errors during instantiation
+        logger.error(f"CCXT error initializing client for {exchange_name_lower} with API key ID {api_key_id}: {be}", exc_info=True)
+        return None
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error initializing CCXT client for {exchange_name_lower} with API key ID {api_key_id}: {e}")
         return None
 
 # --- Core Exchange Interaction Methods ---
@@ -250,16 +273,16 @@ def fetch_account_balance(exchange: ccxt.Exchange) -> Dict[str, Any]:
         logger.info(f"Successfully fetched balance from {exchange.id}.")
         return {"status": "success", "balance": balance}
     except ccxt.AuthenticationError as e:
-        logger.error(f"Authentication failed on {exchange.id} while fetching balance: {e}", exc_info=True)
+        logger.error(f"Authentication failed on {exchange.id} while fetching balance: {e}") # exc_info=True by default for logger.error
         return {"status": "error", "message": f"Authentication failed: {e}"}
     except ccxt.NetworkError as e:
-        logger.error(f"Network error on {exchange.id} while fetching balance: {e}", exc_info=True)
+        logger.error(f"Network error on {exchange.id} while fetching balance: {e}")
         return {"status": "error", "message": f"Network error: {e}"}
-    except ccxt.ExchangeError as e:
-        logger.error(f"Exchange error on {exchange.id} while fetching balance: {e}", exc_info=True)
+    except ccxt.ExchangeError as e: # More general CCXT exchange error
+        logger.error(f"Exchange error on {exchange.id} while fetching balance: {e}")
         return {"status": "error", "message": f"Exchange error: {e}"}
-    except Exception as e:
-        logger.error(f"Unexpected error on {exchange.id} while fetching balance: {e}", exc_info=True)
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error on {exchange.id} while fetching balance: {e}")
         return {"status": "error", "message": f"An unexpected error occurred: {e}"}
 
 def create_exchange_order(exchange: ccxt.Exchange, symbol: str, order_type: str, side: str, 
@@ -275,22 +298,22 @@ def create_exchange_order(exchange: ccxt.Exchange, symbol: str, order_type: str,
         logger.info(f"Successfully created {side} {order_type} order for {amount} {symbol} on {exchange.id}. Order ID: {order.get('id')}")
         return {"status": "success", "order": order}
     except ccxt.AuthenticationError as e:
-        logger.error(f"Authentication failed on {exchange.id} creating order: {e}", exc_info=True)
+        logger.error(f"Authentication failed on {exchange.id} creating order: {e}")
         return {"status": "error", "message": f"Authentication failed: {e}"}
     except ccxt.InsufficientFunds as e:
-        logger.error(f"Insufficient funds on {exchange.id} for order ({symbol}, {amount}): {e}", exc_info=True)
+        logger.error(f"Insufficient funds on {exchange.id} for order ({symbol}, {amount}): {e}")
         return {"status": "error", "message": f"Insufficient funds: {e}"}
     except ccxt.InvalidOrder as e: # E.g. price/amount precision, market closed
-        logger.error(f"Invalid order on {exchange.id} ({symbol}, {amount}, {price}): {e}", exc_info=True)
+        logger.error(f"Invalid order on {exchange.id} ({symbol}, {amount}, {price}): {e}")
         return {"status": "error", "message": f"Invalid order: {e}"}
     except ccxt.NetworkError as e:
-        logger.error(f"Network error on {exchange.id} creating order: {e}", exc_info=True)
+        logger.error(f"Network error on {exchange.id} creating order: {e}")
         return {"status": "error", "message": f"Network error: {e}"}
     except ccxt.ExchangeError as e: # More general exchange errors
-        logger.error(f"Exchange error on {exchange.id} creating order: {e}", exc_info=True)
+        logger.error(f"Exchange error on {exchange.id} creating order: {e}")
         return {"status": "error", "message": f"Exchange error: {e}"}
-    except Exception as e:
-        logger.error(f"Unexpected error on {exchange.id} creating order: {e}", exc_info=True)
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error on {exchange.id} creating order: {e}")
         return {"status": "error", "message": f"An unexpected error occurred: {e}"}
 
 def fetch_exchange_order_status(exchange: ccxt.Exchange, order_id: str, symbol: Optional[str] = None) -> Dict[str, Any]:
@@ -304,19 +327,19 @@ def fetch_exchange_order_status(exchange: ccxt.Exchange, order_id: str, symbol: 
         logger.info(f"Successfully fetched status for order ID {order_id} on {exchange.id}.")
         return {"status": "success", "order": order}
     except ccxt.OrderNotFound as e:
-        logger.warning(f"Order ID {order_id} not found on {exchange.id}: {e}", exc_info=True)
+        logger.warning(f"Order ID {order_id} not found on {exchange.id}: {e}") # exc_info=True not needed for logger.warning by default
         return {"status": "error", "message": f"Order not found: {e}"}
     except ccxt.AuthenticationError as e:
-        logger.error(f"Authentication failed on {exchange.id} fetching order {order_id}: {e}", exc_info=True)
+        logger.error(f"Authentication failed on {exchange.id} fetching order {order_id}: {e}")
         return {"status": "error", "message": f"Authentication failed: {e}"}
     except ccxt.NetworkError as e:
-        logger.error(f"Network error on {exchange.id} fetching order {order_id}: {e}", exc_info=True)
+        logger.error(f"Network error on {exchange.id} fetching order {order_id}: {e}")
         return {"status": "error", "message": f"Network error: {e}"}
-    except ccxt.ExchangeError as e:
-        logger.error(f"Exchange error on {exchange.id} fetching order {order_id}: {e}", exc_info=True)
+    except ccxt.ExchangeError as e: # More general CCXT exchange error
+        logger.error(f"Exchange error on {exchange.id} fetching order {order_id}: {e}")
         return {"status": "error", "message": f"Exchange error: {e}"}
-    except Exception as e:
-        logger.error(f"Unexpected error on {exchange.id} fetching order {order_id}: {e}", exc_info=True)
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error on {exchange.id} fetching order {order_id}: {e}")
         return {"status": "error", "message": f"An unexpected error occurred: {e}"}
 
 def cancel_exchange_order(exchange: ccxt.Exchange, order_id: str, symbol: Optional[str] = None) -> Dict[str, Any]:
@@ -332,22 +355,22 @@ def cancel_exchange_order(exchange: ccxt.Exchange, order_id: str, symbol: Option
         # We return the raw response from ccxt.
         return {"status": "success", "response": response}
     except ccxt.OrderNotFound as e: # If order already filled or doesn't exist
-        logger.warning(f"Order ID {order_id} not found for cancellation on {exchange.id} (possibly already filled/canceled): {e}", exc_info=True)
+        logger.warning(f"Order ID {order_id} not found for cancellation on {exchange.id} (possibly already filled/canceled): {e}")
         return {"status": "error", "message": f"Order not found for cancellation (possibly already filled/canceled): {e}"}
     except ccxt.InvalidOrder as e: # If order cannot be cancelled (e.g. already cancelled/filled)
-         logger.warning(f"Cannot cancel order ID {order_id} on {exchange.id} (e.g. already filled/canceled): {e}", exc_info=True)
+         logger.warning(f"Cannot cancel order ID {order_id} on {exchange.id} (e.g. already filled/canceled): {e}")
          return {"status": "error", "message": f"Cannot cancel order (already filled/canceled): {e}"}
     except ccxt.AuthenticationError as e:
-        logger.error(f"Authentication failed on {exchange.id} canceling order {order_id}: {e}", exc_info=True)
+        logger.error(f"Authentication failed on {exchange.id} canceling order {order_id}: {e}")
         return {"status": "error", "message": f"Authentication failed: {e}"}
     except ccxt.NetworkError as e:
-        logger.error(f"Network error on {exchange.id} canceling order {order_id}: {e}", exc_info=True)
+        logger.error(f"Network error on {exchange.id} canceling order {order_id}: {e}")
         return {"status": "error", "message": f"Network error: {e}"}
-    except ccxt.ExchangeError as e:
-        logger.error(f"Exchange error on {exchange.id} canceling order {order_id}: {e}", exc_info=True)
+    except ccxt.ExchangeError as e: # More general CCXT exchange error
+        logger.error(f"Exchange error on {exchange.id} canceling order {order_id}: {e}")
         return {"status": "error", "message": f"Exchange error: {e}"}
-    except Exception as e:
-        logger.error(f"Unexpected error on {exchange.id} canceling order {order_id}: {e}", exc_info=True)
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error on {exchange.id} canceling order {order_id}: {e}")
         return {"status": "error", "message": f"An unexpected error occurred: {e}"}
 
 # --- End of Core Exchange Interaction Methods ---
@@ -366,8 +389,11 @@ def fetch_historical_data(exchange_id: str, symbol: str, timeframe: str, start_d
         exchange_class = getattr(ccxt, exchange_id_lower)
         exchange = exchange_class({'enableRateLimit': True})
         logger.info(f"Initialized CCXT exchange '{exchange_id}' for historical data.")
-    except Exception as e:
-        logger.error(f"Failed to initialize CCXT exchange '{exchange_id}' for historical data: {e}", exc_info=True)
+    except ccxt.BaseError as be:
+        logger.error(f"CCXT error initializing exchange '{exchange_id}' for historical data: {be}", exc_info=True)
+        return pd.DataFrame()
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error initializing exchange '{exchange_id}' for historical data: {e}")
         return pd.DataFrame()
 
     all_ohlcv = []
@@ -399,14 +425,14 @@ def fetch_historical_data(exchange_id: str, symbol: str, timeframe: str, start_d
             time.sleep(max(exchange.rateLimit / 1000, 1)) # Ensure at least 1s sleep
             continue 
         except ccxt.NetworkError as e: # More specific network error
-            logger.error(f"Network error fetching historical data for {symbol}@{timeframe} on {exchange_id}: {e}", exc_info=True)
+            logger.error(f"Network error fetching historical data for {symbol}@{timeframe} on {exchange_id}: {e}") # Removed exc_info=True, logger.error includes it by default
             time.sleep(5) # Wait longer for network issues
             continue # Optionally retry for network issues
-        except ccxt.BaseError as e: # Other CCXT errors
-            logger.error(f"CCXT error fetching historical data for {symbol}@{timeframe} on {exchange_id}: {e}", exc_info=True)
+        except ccxt.BaseError as e: # Other CCXT errors (already specific)
+            logger.error(f"CCXT error fetching historical data for {symbol}@{timeframe} on {exchange_id}: {e}")
             break
-        except Exception as e:
-            logger.error(f"Unexpected error fetching historical data for {symbol}@{timeframe} on {exchange_id}: {e}", exc_info=True)
+        except Exception as e: # General fallback
+            logger.exception(f"Unexpected error fetching historical data for {symbol}@{timeframe} on {exchange_id}: {e}")
             break
 
     if not all_ohlcv:

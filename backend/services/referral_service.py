@@ -64,12 +64,17 @@ def process_payment_for_referral_commission(db_session: Session, referred_user_i
         logger.info(f"No referral record found for user ID {referred_user_id}. No commission processed.")
         return {"status": "info", "message": "User was not referred or referral record missing."}
 
-    if referral_record.first_payment_at is not None:
-        logger.info(f"Referral ID {referral_record.id}: Commission already processed for first payment.")
-        # TODO: Implement recurring commission logic if this feature is enabled (e.g., via a system setting). Currently, commission is processed only for the first payment.
-        return {"status": "info", "message": "First payment commission already processed for this referral."}
+    if not referral_record.is_active_for_commission:
+        logger.info(f"Referral ID {referral_record.id} is not active for commission. No commission processed for this payment.")
+        return {"status": "info", "message": "Referral is not active for commission."}
 
-    referral_record.first_payment_at = datetime.datetime.utcnow()
+    # Set first_payment_at only if it's the actual first payment by the referred user
+    if referral_record.first_payment_at is None:
+        referral_record.first_payment_at = datetime.datetime.utcnow()
+        logger.info(f"Referral ID {referral_record.id}: Recording first payment time.")
+    
+    # Proceed to calculate commission for this payment (could be first or recurring)
+    logger.info(f"Referral ID {referral_record.id}: Processing payment for commission (First payment: {referral_record.first_payment_at is not None}, Active for Commission: {referral_record.is_active_for_commission}).")
     
     # Get referral commission rate from system settings, with a fallback to config
     commission_rate_str = get_system_setting(

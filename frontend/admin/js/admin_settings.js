@@ -6,126 +6,127 @@ document.addEventListener('DOMContentLoaded', () => {
     // const isAdmin = localStorage.getItem('isAdmin') === 'true';
     // if (!isAdmin || !authToken) { /* Redirect */ }
 
-    const siteSettingsForm = document.getElementById('siteSettingsForm');
-    
-    const coinbaseApiKeyStatusElem = document.getElementById('coinbaseApiKeyStatus');
-    const coinbaseWebhookSecretStatusElem = document.getElementById('coinbaseWebhookSecretStatus');
-    const emailSmtpHostValueElem = document.getElementById('emailSmtpHostValue'); // To display current value
+    const systemSettingsForm = document.getElementById('systemSettingsForm'); // Assuming form ID is systemSettingsForm
+    const settingsContainer = document.getElementById('systemSettingsContainer'); // Container to dynamically add inputs
 
-    const coinbaseApiKeyInput = document.getElementById('coinbaseApiKey');
-    const coinbaseWebhookSecretInput = document.getElementById('coinbaseWebhookSecret');
-    const emailSmtpHostInput = document.getElementById('emailSmtpHost');
-    // Add more elements if new settings are added to admin_settings.html
+    // Store initially fetched settings to compare on save
+    let currentSystemSettings = {};
 
-    async function fetchSiteSettings() {
-        console.log("Fetching site settings...");
-        if (!coinbaseApiKeyStatusElem) { console.log("Settings page elements not found"); return; } // Ensure elements exist
+    async function fetchSystemSettings() {
+        console.log("Fetching system settings from DB...");
+        if (!settingsContainer) {
+            console.error("System settings container not found.");
+            return;
+        }
+        settingsContainer.innerHTML = '<p>Loading settings...</p>';
 
         try {
-            // Conceptual API: GET /api/admin/settings
-            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/site-settings`, { 
-                headers: { 'Authorization': `Bearer ${authToken}` } 
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/system-settings`, {
+                headers: { 'Authorization': `Bearer ${authToken}` }
             });
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            const data = await response.json(); // Expects { status, settings: {...} }
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData.detail || `HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
             
-            if (data.status === "success" && data.settings) {
-                const settings = data.settings;
-                if (coinbaseApiKeyStatusElem) {
-                    coinbaseApiKeyStatusElem.textContent = settings.COINBASE_COMMERCE_API_KEY_SET ? 'Set' : 'Not Set';
-                    coinbaseApiKeyStatusElem.style.color = settings.COINBASE_COMMERCE_API_KEY_SET ? 'var(--success-color)' : 'var(--danger-color)';
-                }
-                if (coinbaseWebhookSecretStatusElem) {
-                    coinbaseWebhookSecretStatusElem.textContent = settings.COINBASE_COMMERCE_WEBHOOK_SECRET_SET ? 'Set' : 'Not Set';
-                    coinbaseWebhookSecretStatusElem.style.color = settings.COINBASE_COMMERCE_WEBHOOK_SECRET_SET ? 'var(--success-color)' : 'var(--danger-color)';
-                }
-                if (emailSmtpHostValueElem && emailSmtpHostInput) {
-                    emailSmtpHostValueElem.textContent = settings.EMAIL_SMTP_HOST || 'Not Set';
-                    emailSmtpHostInput.value = settings.EMAIL_SMTP_HOST || '';
-                }
-                // Example for a boolean setting like Maintenance Mode
-                // const maintenanceModeToggle = document.getElementById('maintenanceModeToggle'); // Assuming you add this
-                // if (maintenanceModeToggle) maintenanceModeToggle.checked = settings.MAINTENANCE_MODE;
+            if (data.status === "success" && data.system_settings) {
+                settingsContainer.innerHTML = ''; // Clear loading
+                currentSystemSettings = {}; // Reset
+                data.system_settings.forEach(setting => {
+                    currentSystemSettings[setting.key] = setting; // Store full setting object
 
+                    const formGroup = document.createElement('div');
+                    formGroup.className = 'form-group';
+
+                    const label = document.createElement('label');
+                    label.setAttribute('for', `settingInput_${setting.key}`);
+                    label.textContent = `${setting.key} (${setting.description || 'No description'}):`;
+                    
+                    const input = document.createElement('input');
+                    input.type = 'text'; // Keep as text for now, specific types can be handled on backend or with more complex FE
+                    input.className = 'form-control'; // Assuming bootstrap or similar styling
+                    input.id = `settingInput_${setting.key}`;
+                    input.name = setting.key;
+                    input.value = setting.value;
+                    
+                    formGroup.appendChild(label);
+                    formGroup.appendChild(input);
+                    settingsContainer.appendChild(formGroup);
+                });
             } else {
-                throw new Error(data.message || "Failed to parse site settings.");
+                throw new Error(data.message || "Failed to parse system settings.");
             }
         } catch (error) {
-            console.error("Failed to load site settings:", error);
-            if (coinbaseApiKeyStatusElem) coinbaseApiKeyStatusElem.textContent = "Error loading";
-            // Update other elements to show error state
+            console.error("Failed to load system settings:", error);
+            settingsContainer.innerHTML = `<p class="error-message">Error loading system settings: ${error.message}</p>`;
         }
     }
 
-    if (siteSettingsForm) {
-        siteSettingsForm.addEventListener('submit', async (event) => {
+    if (systemSettingsForm) {
+        systemSettingsForm.addEventListener('submit', async (event) => {
             event.preventDefault();
-            const settingsToUpdate = []; // Array of {key, value} pairs
             
-            // Only include settings if a new value is provided (especially for sensitive ones)
-            if (coinbaseApiKeyInput.value) settingsToUpdate.push({key: "COINBASE_COMMERCE_API_KEY", value: coinbaseApiKeyInput.value});
-            if (coinbaseWebhookSecretInput.value) settingsToUpdate.push({key: "COINBASE_COMMERCE_WEBHOOK_SECRET", value: coinbaseWebhookSecretInput.value});
-            
-            // For non-sensitive, always send current value or new value
-            if (emailSmtpHostInput) settingsToUpdate.push({key: "EMAIL_SMTP_HOST", value: emailSmtpHostInput.value});
-            
-            // Example for a boolean toggle
-            // const maintenanceModeToggle = document.getElementById('maintenanceModeToggle');
-            // if (maintenanceModeToggle) settingsToUpdate.push({key: "MAINTENANCE_MODE", value: maintenanceModeToggle.checked});
+            const settingsToUpdate = [];
+            const inputs = settingsContainer.querySelectorAll('input[type="text"]');
 
+            inputs.forEach(input => {
+                const key = input.name;
+                const newValue = input.value;
+                // Check if value has changed from originally fetched value
+                if (currentSystemSettings[key] && currentSystemSettings[key].value !== newValue) {
+                    settingsToUpdate.push({ 
+                        key: key, 
+                        value: newValue,
+                        // Description could also be made editable if desired
+                        description: currentSystemSettings[key].description 
+                    });
+                }
+            });
 
             if (settingsToUpdate.length === 0) {
-                alert("No changes to save.");
+                alert("No changes detected in system settings.");
                 return;
             }
 
-            if (!confirm("Are you sure you want to update these site settings? Some changes may require a server restart or can impact site functionality if misconfigured.")) {
+            if (!confirm(`Are you sure you want to update ${settingsToUpdate.length} system setting(s)?`)) {
                 return;
             }
 
-            console.log("Updating site settings:", settingsToUpdate);
-            let allUpdatesSuccessful = true;
+            let updateSuccessCount = 0;
+            let updateErrorCount = 0;
 
-            try {
-                // Conceptual API: POST /api/admin/settings (can send multiple updates or one by one)
-                // For simplicity, let's assume a single endpoint that takes a list of updates
-                // For this conceptual example, we don't have a backend endpoint to update these settings directly via a generic API.
-                // The instruction was to make BACKEND_API_BASE_URL configurable for *fetching*.
-                // Actual update logic for these specific settings would need dedicated backend endpoints,
-                // which are not part of this task. This part remains simulated.
-                
-                // const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/site-settings`, { 
-                //     method: 'POST', 
-                //     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-                //     body: JSON.stringify({settings: settingsToUpdate}) // Send as a list of key-value pairs
-                // });
-                // if (!response.ok) {
-                //     const errData = await response.json().catch(() => ({message: "Unknown error updating settings"}));
-                //     throw new Error(errData.message || `HTTP error! status: ${response.status}`);
-                // }
-                // const result = await response.json();
-
-                await new Promise(resolve => setTimeout(resolve, 700)); // Simulate delay
-                const result = {status: "success", message: "Site settings updated successfully (simulated). Some changes may require server restart."};
-
-                if (result.status === "success") {
-                    alert(result.message);
-                } else {
-                    allUpdatesSuccessful = false;
-                    throw new Error(result.message || "Failed to update one or more settings.");
+            for (const setting of settingsToUpdate) {
+                console.log(`Updating system setting: ${setting.key} to ${setting.value}`);
+                try {
+                    const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/system-settings/${setting.key}`, {
+                        method: 'PUT',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}` 
+                        },
+                        body: JSON.stringify({ value: setting.value, description: setting.description })
+                    });
+                    const result = await response.json();
+                    if (!response.ok || result.status !== "success") {
+                        updateErrorCount++;
+                        console.error(`Failed to update setting ${setting.key}:`, result.message || result.detail || `HTTP ${response.status}`);
+                        alert(`Failed to update setting ${setting.key}: ${result.message || result.detail || 'Unknown error'}`);
+                    } else {
+                        updateSuccessCount++;
+                    }
+                } catch (error) {
+                    updateErrorCount++;
+                    console.error(`Error updating setting ${setting.key}:`, error);
+                    alert(`Error updating setting ${setting.key}: ${error.message}`);
                 }
-            } catch (error) {
-                allUpdatesSuccessful = false;
-                console.error("Error updating site settings:", error);
-                alert("Error updating settings: " + error.message);
-            } finally {
-                // Clear sensitive input fields after attempt
-                if (coinbaseApiKeyInput) coinbaseApiKeyInput.value = ''; 
-                if (coinbaseWebhookSecretInput) coinbaseWebhookSecretInput.value = '';
-                if (allUpdatesSuccessful) fetchSiteSettings(); // Re-fetch to show updated status
             }
+
+            alert(`Settings update process finished. Successful: ${updateSuccessCount}, Failed: ${updateErrorCount}.`);
+            fetchSystemSettings(); // Re-fetch to show updated values and clear changed state
         });
     }
 
-    fetchSiteSettings();
+    // Initial fetch of settings
+    fetchSystemSettings();
 });

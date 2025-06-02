@@ -52,9 +52,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     const editButton = document.createElement('button');
                     editButton.className = 'btn btn-sm btn-outline';
                     editButton.textContent = 'Edit';
-                    editButton.onclick = () => handleEditStrategyModal(strategy); // Pass full strategy object
+                    editButton.onclick = () => handleEditStrategyModal(strategy); 
                     actionsCell.appendChild(editButton);
-                    // TODO: Add delete/disable buttons if strategies are DB managed and API supports it
+
+                    const toggleActiveButton = document.createElement('button');
+                    toggleActiveButton.className = `btn btn-sm ${strategy.is_active ? 'btn-warning' : 'btn-success'}`;
+                    toggleActiveButton.textContent = strategy.is_active ? 'Disable' : 'Enable';
+                    toggleActiveButton.style.marginLeft = '5px';
+                    toggleActiveButton.onclick = () => handleToggleStrategyStatus(strategy.id, strategy.is_active);
+                    actionsCell.appendChild(toggleActiveButton);
+
+                    const deleteButton = document.createElement('button');
+                    deleteButton.className = 'btn btn-sm btn-danger';
+                    deleteButton.textContent = 'Delete';
+                    deleteButton.style.marginLeft = '5px';
+                    deleteButton.onclick = () => handleDeleteStrategy(strategy.id, strategy.name);
+                    actionsCell.appendChild(deleteButton);
+                    // TODO for delete: Backend endpoint for DELETE /api/v1/admin/strategies/{strategy_id} needs to be implemented.
                 });
             } else {
                 throw new Error(data.message || "Failed to parse strategies list.");
@@ -175,5 +189,81 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchAdminStrategies();
     } else {
         if (strategiesTableBody) strategiesTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">Please login as admin.</td></tr>';
+    }
+
+    // --- Modal and New/Edit Logic Description (as per subtask) ---
+    // To replace prompt()-based editing/adding:
+    // 1. HTML Modal:
+    //    - A hidden modal element would be added to admin_strategies.html.
+    //    - It would contain a form with input fields for: Name, Description, Python Code Path,
+    //      Default Parameters (textarea), Category, Risk Level, Payment Options JSON (textarea), and an Is Active checkbox.
+    //    - A hidden input for 'strategyId' would be used for editing.
+    //    - "Save" and "Cancel" buttons.
+    // 2. openStrategyModal(strategyDataOrNull):
+    //    - If strategyDataOrNull is provided (editing), populate form fields with this data and set strategyId.
+    //    - If null (adding), clear form fields and strategyId.
+    //    - Display the modal.
+    // 3. Modal "Save" Button Listener:
+    //    - Collects data from form fields.
+    //    - Performs basic frontend validation (e.g., required fields, JSON validity for params/payment_options).
+    //    - If strategyId exists, calls handleUpdateStrategy(strategyId, collectedData).
+    //    - Else, calls a new handleCreateStrategy(collectedData) function (which would adapt current addNewStrategyBtn logic).
+    //    - Handles API response and closes modal or shows errors.
+    // 4. Modal "Cancel" Button: Hides the modal.
+    // The existing handleUpdateStrategy and the logic inside addNewStrategyBtn's listener would be adapted.
+
+    async function handleToggleStrategyStatus(strategyId, currentIsActive) {
+        const newStatus = !currentIsActive;
+        if (!confirm(`Are you sure you want to ${newStatus ? 'enable' : 'disable'} strategy ID ${strategyId}?`)) return;
+
+        try {
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/strategies/${strategyId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                body: JSON.stringify({ is_active: newStatus }) // Assumes backend endpoint handles partial update for is_active
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || result.message || "Failed to toggle strategy status.");
+            }
+            alert(result.message || `Strategy status updated to ${newStatus ? 'Active' : 'Inactive'}.`);
+            fetchAdminStrategies(); // Refresh the list
+        } catch (error) {
+            console.error(`Error toggling strategy ${strategyId} status:`, error);
+            alert(`Error: ${error.message}`);
+        }
+    }
+
+    async function handleDeleteStrategy(strategyId, strategyName) {
+        if (!confirm(`Are you sure you want to DELETE strategy ID ${strategyId} (${strategyName})? This action cannot be undone.`)) return;
+        
+        // Placeholder for backend API call, as DELETE endpoint might not exist yet.
+        console.warn(`Attempting to delete strategy ID ${strategyId}. Backend DELETE endpoint needs to be implemented.`);
+        alert(`Simulated delete for strategy ID ${strategyId}. Implement backend DELETE /api/v1/admin/strategies/${strategyId}`);
+        
+        // Example of what the call would look like if endpoint exists:
+        /*
+        try {
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/strategies/${strategyId}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${authToken}` }
+            });
+            if (!response.ok) {
+                const result = await response.json().catch(() => ({})); // Try to get error message
+                throw new Error(result.detail || result.message || `Failed to delete strategy (HTTP ${response.status})`);
+            }
+            // If response is 204 No Content, there might not be a JSON body
+            if (response.status === 204) {
+                 alert(`Strategy ID ${strategyId} deleted successfully.`);
+            } else {
+                const result = await response.json();
+                alert(result.message || `Strategy ID ${strategyId} deleted successfully.`);
+            }
+            fetchAdminStrategies(); // Refresh the list
+        } catch (error) {
+            console.error(`Error deleting strategy ${strategyId}:`, error);
+            alert(`Error: ${error.message}`);
+        }
+        */
     }
 });

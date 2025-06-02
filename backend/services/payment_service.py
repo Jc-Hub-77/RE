@@ -6,9 +6,10 @@ import uuid
 import os
 import logging
 from coinbase_commerce.client import Client
-from coinbase_commerce.error import SignatureVerificationError, WebhookInvalidPayload
+from coinbase_commerce.error import SignatureVerificationError, WebhookInvalidPayload, APIError as CoinbaseAPIError, InvalidRequestError as CoinbaseInvalidRequestError, AuthenticationError as CoinbaseAuthError
 from coinbase_commerce.webhook import Webhook
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import desc
 
 from backend.models import User, UserStrategySubscription, PaymentTransaction 
@@ -47,18 +48,28 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
     item_id_str = metadata.get('item_id') # Can be strategy_id or user_strategy_subscription_id
     item_type = metadata.get('item_type')
     subscription_months = int(metadata.get('subscription_months', 1))
-    payment_amount_usd = float(metadata.get('payment_amount_usd', 0.0)) # Ensure this is passed in metadata
+    try:
+        user_id_val = int(metadata.get('user_id'))
+        item_id_str_val = metadata.get('item_id')
+        item_type_val = metadata.get('item_type')
+        subscription_months_val = int(metadata.get('subscription_months', 1))
+        payment_amount_usd_val = float(metadata.get('payment_amount_usd', 0.0))
+    except (ValueError, TypeError) as e:
+        logger.error(f"Invalid metadata format for successful payment {payment_transaction.id}: {e}. Metadata: {metadata}", exc_info=True)
+        payment_transaction.status_message = f"Processing Error: Invalid metadata format - {str(e)[:100]}"
+        db_session.commit() # Commit status update
+        return False
 
-    if not all([user_id, item_id_str, item_type, payment_amount_usd > 0]):
+    if not all([user_id_val, item_id_str_val, item_type_val, payment_amount_usd_val > 0]):
         logger.error(f"Missing critical metadata for processing successful payment {payment_transaction.id}. Metadata: {metadata}")
         payment_transaction.status_message = "Processing Error: Missing critical metadata."
-        db_session.commit()
+        db_session.commit() # Commit status update
         return False
     
-    item_id = int(item_id_str)
+    item_id = int(item_id_str_val)
 
     try:
-        if item_type == "new_strategy_subscription":
+        if item_type_val == "new_strategy_subscription":
             api_key_id = int(metadata.get('api_key_id'))
             custom_parameters_json = metadata.get('custom_parameters_json', '{}')
             custom_parameters = json.loads(custom_parameters_json)
@@ -110,7 +121,7 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
 
         # Process referral commission
         referral_result = referral_service.process_payment_for_referral_commission(
-            db_session, referred_user_id=user_id, payment_amount_usd=payment_amount_usd,
+            db_session, referred_user_id=user_id_val, payment_amount_usd=payment_amount_usd_val,
             payment_transaction_id=payment_transaction.id
         )
         if referral_result["status"] == "error":
@@ -124,10 +135,36 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
         logger.info(f"Successfully processed payment {payment_transaction.id} and associated actions.")
         return True
 
-    except Exception as e:
-        logger.error(f"Generic error during _process_successful_payment for transaction {payment_transaction.id}: {e}", exc_info=True)
-        payment_transaction.status_message = f"Generic processing error: {str(e)[:100]}"
+    except json.JSONDecodeError as je:
+        logger.error(f"JSONDecodeError in _process_successful_payment for TxID {payment_transaction.id}: {je}", exc_info=True)
+        payment_transaction.status_message = f"Processing Error: Invalid parameter JSON format - {str(je)[:100]}"
         db_session.commit()
+        return False
+    except ValueError as ve: # Handles int() or float() conversion errors if metadata values are not numbers
+        logger.error(f"ValueError in _process_successful_payment for TxID {payment_transaction.id}: {ve}", exc_info=True)
+        payment_transaction.status_message = f"Processing Error: Invalid data type in metadata - {str(ve)[:100]}"
+        db_session.commit()
+        return False
+    except SQLAlchemyError as sae:
+        logger.error(f"SQLAlchemyError in _process_successful_payment for TxID {payment_transaction.id}: {sae}", exc_info=True)
+        db_session.rollback() # Rollback any partial changes if main commit fails
+        payment_transaction.status_message = f"Processing Error: Database issue - {str(sae)[:100]}"
+        # Try to commit just the status_message update on the original object if session is still usable
+        try:
+            db_session.add(payment_transaction) # Re-add if rolled back
+            db_session.commit()
+        except SQLAlchemyError:
+            db_session.rollback() # Give up if even status update fails
+            logger.error(f"Failed to update error status for TxID {payment_transaction.id} after SQLAlchemyError.", exc_info=True)
+        return False
+    except Exception as e:
+        logger.exception(f"Unexpected error in _process_successful_payment for transaction {payment_transaction.id}: {e}")
+        payment_transaction.status_message = f"Generic processing error: {str(e)[:100]}"
+        try:
+            db_session.commit()
+        except SQLAlchemyError:
+            db_session.rollback()
+            logger.error(f"Failed to update error status for TxID {payment_transaction.id} after unexpected error.", exc_info=True)
         return False
 
 # --- Payment Gateway Interaction ---
@@ -179,10 +216,15 @@ def create_coinbase_commerce_charge(db_session: Session, user_id: int,
         db_session.add(new_payment)
         db_session.commit()
         db_session.refresh(new_payment)
-    except Exception as e:
+    except SQLAlchemyError as e:
         db_session.rollback()
-        logger.error(f"Error saving initial payment transaction to DB: {e}", exc_info=True)
+        logger.exception(f"SQLAlchemyError saving initial payment transaction to DB for user {user_id}: {e}")
         return {"status": "error", "message": "Database error saving payment transaction."}
+    except Exception as e: # Should be rare if SQLAlchemyError is caught
+        db_session.rollback()
+        logger.exception(f"Unexpected error saving initial payment transaction to DB for user {user_id}: {e}")
+        return {"status": "error", "message": "Unexpected database error saving payment transaction."}
+
 
     if not coinbase_client:
         logger.info(f"Simulating Coinbase Commerce charge for {item_name}. Internal Ref: {internal_transaction_ref}")
@@ -220,8 +262,13 @@ def create_coinbase_commerce_charge(db_session: Session, user_id: int,
             "internal_transaction_ref": internal_transaction_ref, "gateway_charge_id": charge.code,
             "payment_page_url": charge.hosted_url, "expires_at": charge.expires_at
         }
-    except Exception as e:
-        logger.error(f"Error creating Coinbase Commerce charge: {e}", exc_info=True)
+    except (CoinbaseAPIError, CoinbaseInvalidRequestError, CoinbaseAuthError) as cbe:
+        logger.error(f"Coinbase Commerce API error creating charge for user {user_id}: {cbe}", exc_info=True)
+        new_payment.status = "failed"; new_payment.status_message = f"Gateway API error: {str(cbe)[:100]}"
+        db_session.commit()
+        return {"status": "error", "message": f"Payment gateway API error: {cbe}"}
+    except Exception as e: # General fallback
+        logger.exception(f"Unexpected error creating Coinbase Commerce charge for user {user_id}: {e}")
         new_payment.status = "failed"; new_payment.status_message = f"Gateway error: {str(e)[:100]}"
         db_session.commit()
         return {"status": "error", "message": f"Payment gateway error: {str(e)}"}
@@ -263,10 +310,13 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
         try:
             db_session.commit()
             logger.info(f"Webhook: Updated gateway_metadata_json for already completed TxID {payment_transaction.id}")
-        except Exception as e:
+        except SQLAlchemyError as e:
             db_session.rollback()
-            logger.error(f"DB error updating gateway_metadata_json for completed TxID {payment_transaction.id}: {e}", exc_info=True)
+            logger.exception(f"SQLAlchemyError updating gateway_metadata_json for completed TxID {payment_transaction.id}: {e}")
             # Non-critical error, so we can still return success for the webhook acknowledgement.
+        except Exception as e: # Should be rare
+            db_session.rollback()
+            logger.exception(f"Unexpected error updating gateway_metadata_json for completed TxID {payment_transaction.id}: {e}")
         return {"status": "success", "message": "Already completed, metadata updated."}, 200
 
     # Update payment transaction based on webhook
@@ -310,10 +360,15 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
     try:
         db_session.commit()
         logger.info(f"Payment {payment_transaction.id} (Gateway: {gateway_charge_id}) status updated to {new_status_from_webhook} via webhook.")
-    except Exception as e:
+    except SQLAlchemyError as e:
         db_session.rollback()
-        logger.error(f"DB error updating payment status for {gateway_charge_id} via webhook: {e}", exc_info=True)
+        logger.exception(f"SQLAlchemyError updating payment status for {gateway_charge_id} via webhook: {e}")
         return {"status": "error", "message": "DB error during webhook status update."}, 500
+    except Exception as e: # Should be rare
+        db_session.rollback()
+        logger.exception(f"Unexpected error updating payment status for {gateway_charge_id} via webhook: {e}")
+        return {"status": "error", "message": "Unexpected DB error during webhook status update."}, 500
+
 
     if new_status_from_webhook == "completed":
         # Pass extracted metadata to the helper function
@@ -476,7 +531,11 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
         if update_request.new_status == 'completed' and old_status != 'completed':
             message += " Post-payment processing attempted: " + ("Succeeded." if processed_successfully else "Failed (check logs and transaction status message).")
         return {"status": "success", "message": message}
-    except Exception as e:
+    except SQLAlchemyError as e:
         db_session.rollback()
-        logger.error(f"Database error manually updating payment status for transaction {transaction_id}: {e}", exc_info=True)
+        logger.exception(f"SQLAlchemyError manually updating payment status for transaction {transaction_id}: {e}")
         return {"status": "error", "message": "Database error manually updating status."}
+    except Exception as e: # Should be rare
+        db_session.rollback()
+        logger.exception(f"Unexpected error manually updating payment status for transaction {transaction_id}: {e}")
+        return {"status": "error", "message": "Unexpected database error manually updating status."}

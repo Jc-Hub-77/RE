@@ -7,9 +7,12 @@ import importlib.util
 import logging
 import pandas as pd # Added for DataFrame conversion
 import smtplib # Added for email
+import socket # For socket.gaierror in email task
 from email.mime.text import MIMEText # Added for email
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from celery.exceptions import OperationalError as CeleryOperationalError # Though tasks usually don't handle their own send errors
 from backend.celery_app import celery_app
 from backend.models import UserStrategySubscription, ApiKey, User, Strategy as StrategyModel, BacktestResult # Added BacktestResult
 from backend.utils import _load_strategy_class_from_db_obj # Import from utils
@@ -64,14 +67,25 @@ def run_live_strategy(self, user_sub_id: int):
         # Resolve capital: Use from custom_params if present, else use a default from settings or a fallback.
         capital_for_strategy = custom_params.get("capital", getattr(settings, 'DEFAULT_STRATEGY_CAPITAL', 10000))
         
-        default_symbol = "BTC/USDT" 
-        default_timeframe = "1h"    
+        # Ensure symbol and timeframe are present in custom_params
+        symbol = custom_params.get("symbol")
+        timeframe = custom_params.get("timeframe")
+
+        if not symbol:
+            logger.error(f"[SubID {user_sub_id}] 'symbol' is missing from custom_parameters.")
+            user_sub.status_message = "Error: Strategy parameter 'symbol' is missing."; user_sub.is_active = False; db_session.commit()
+            return {"status": "error", "message": "Strategy parameter 'symbol' is missing."}
+        
+        if not timeframe:
+            logger.error(f"[SubID {user_sub_id}] 'timeframe' is missing from custom_parameters.")
+            user_sub.status_message = "Error: Strategy parameter 'timeframe' is missing."; user_sub.is_active = False; db_session.commit()
+            return {"status": "error", "message": "Strategy parameter 'timeframe' is missing."}
         
         # Prepare init_params for StrategyClass constructor
         # Pass all custom_parameters, plus resolved capital, symbol, and timeframe.
         init_params = {
-            "symbol": custom_params.get("symbol", default_symbol), 
-            "timeframe": custom_params.get("timeframe", default_timeframe),
+            "symbol": symbol, 
+            "timeframe": timeframe,
             "capital": capital_for_strategy, 
             **custom_params 
         }
@@ -147,11 +161,17 @@ def run_live_strategy(self, user_sub_id: int):
                     logger.debug(f"[SubID {user_sub_id}] Fetched {len(market_data_df)} candles for {init_params['symbol']}.")
                 else: 
                     logger.warning(f"[SubID {user_sub_id}] No OHLCV data fetched for {init_params['symbol']}@{init_params['timeframe']}.")
-            except ccxt.BaseError as e: 
-                logger.error(f"[SubID {user_sub_id}] CCXT error fetching market data for {init_params['symbol']}: {e}", exc_info=True)
-                current_sub_for_loop.status_message = f"Running - Data fetch CCXT error: {str(e)[:100]}"; db_session.commit()
+            except ccxt.NetworkError as ne: # More specific CCXT errors
+                logger.error(f"[SubID {user_sub_id}] CCXT NetworkError fetching market data for {init_params['symbol']}: {ne}", exc_info=True)
+                current_sub_for_loop.status_message = f"Running - Data fetch network error: {str(ne)[:100]}"; db_session.commit()
+            except ccxt.ExchangeError as ee: # More specific CCXT errors
+                logger.error(f"[SubID {user_sub_id}] CCXT ExchangeError fetching market data for {init_params['symbol']}: {ee}", exc_info=True)
+                current_sub_for_loop.status_message = f"Running - Data fetch exchange error: {str(ee)[:100]}"; db_session.commit()
+            except ccxt.BaseError as be: # Catch other CCXT base errors
+                logger.error(f"[SubID {user_sub_id}] CCXT BaseError fetching market data for {init_params['symbol']}: {be}", exc_info=True)
+                current_sub_for_loop.status_message = f"Running - Data fetch CCXT error: {str(be)[:100]}"; db_session.commit()
             except Exception as e: 
-                logger.error(f"[SubID {user_sub_id}] Unexpected error fetching market data for {init_params['symbol']}: {e}", exc_info=True)
+                logger.exception(f"[SubID {user_sub_id}] Unexpected error fetching market data for {init_params['symbol']}: {e}")
                 current_sub_for_loop.status_message = f"Running - Data fetch error: {str(e)[:100]}"; db_session.commit()
 
             try:
@@ -165,8 +185,8 @@ def run_live_strategy(self, user_sub_id: int):
                 current_sub_for_loop.status_message = f"Running - Last successful cycle: {datetime.datetime.utcnow().isoformat()}"
                 db_session.commit()
                 logger.debug(f"[SubID {user_sub_id}] Strategy execute_live_signal completed for {init_params['symbol']}.")
-            except Exception as e: 
-                logger.error(f"[SubID {user_sub_id}] Error in strategy execute_live_signal for '{strategy_instance.name}': {e}", exc_info=True)
+            except Exception as e: # This catches errors from within the strategy's own code
+                logger.exception(f"[SubID {user_sub_id}] Error in strategy execute_live_signal for '{strategy_instance.name}': {e}")
                 current_sub_for_loop.status_message = f"Error in execution: {str(e)[:150]}" 
                 db_session.commit()
             
@@ -187,18 +207,39 @@ def run_live_strategy(self, user_sub_id: int):
             
             time.sleep(sleep_duration_seconds)
 
-    except Exception as e: 
-        logger.error(f"[SubID {user_sub_id}] Critical error in task run_live_strategy: {e}", exc_info=True)
+    except SQLAlchemyError as sae:
+        logger.exception(f"[SubID {user_sub_id}] SQLAlchemyError in task run_live_strategy setup: {sae}")
+        # Attempt to update status if possible, but session might be compromised
         try:
-            if db_session: 
-                sub_to_update = db_session.query(UserStrategySubscription).filter(UserStrategySubscription.id == user_sub_id).first()
+            if db_session and user_sub: # Check if user_sub was fetched
+                user_sub.status_message = f"DB Error during task setup: {str(sae)[:100]}"
+                user_sub.is_active = False
+                db_session.commit()
+        except Exception as db_err_sae:
+            logger.error(f"[SubID {user_sub_id}] Further DB error updating status after SQLAlchemyError: {db_err_sae}", exc_info=True)
+        return {"status": "error", "message": f"Database error in task setup: {sae}"}
+    except ccxt.BaseError as cbe: # Errors during exchange init or initial checks
+        logger.exception(f"[SubID {user_sub_id}] CCXT BaseError in task run_live_strategy setup: {cbe}")
+        try:
+            if db_session and user_sub:
+                user_sub.status_message = f"Exchange Init Error: {str(cbe)[:100]}"
+                user_sub.is_active = False
+                db_session.commit()
+        except Exception as db_err_cbe:
+            logger.error(f"[SubID {user_sub_id}] Further DB error updating status after CCXT Error: {db_err_cbe}", exc_info=True)
+        return {"status": "error", "message": f"CCXT error in task setup: {cbe}"}
+    except Exception as e: # General fallback for setup errors
+        logger.exception(f"[SubID {user_sub_id}] Critical error in task run_live_strategy setup phase: {e}")
+        try:
+            if db_session and user_sub: # Check if user_sub was fetched
+                sub_to_update = db_session.query(UserStrategySubscription).filter(UserStrategySubscription.id == user_sub_id).first() # Re-fetch for safety
                 if sub_to_update: 
-                    sub_to_update.status_message = f"Critical Task Error: {str(e)[:150]}"
+                    sub_to_update.status_message = f"Critical Task Setup Error: {str(e)[:150]}"
                     sub_to_update.is_active = False 
                     db_session.commit()
         except Exception as db_err: 
-            logger.error(f"[SubID {user_sub_id}] DB error while updating status on critical task error: {db_err}", exc_info=True)
-        return {"status": "error", "message": f"Critical error in task: {e}"} 
+            logger.error(f"[SubID {user_sub_id}] DB error while updating status on critical task setup error: {db_err}", exc_info=True)
+        return {"status": "error", "message": f"Critical error in task setup: {e}"} 
     finally:
         if db_session: db_session.close()
         logger.info(f"[SubID {user_sub_id}] Task run_live_strategy finished one execution cycle or stopped.")
@@ -228,9 +269,20 @@ def run_backtest_task(self, backtest_result_id: int, user_id: int, strategy_id: 
         else:
             logger.error(f"Backtest task {self.request.id} for BR_ID {backtest_result_id} reported failure from _perform_backtest_logic: {result.get('message')}")
         
-        return result 
-    except Exception as e: 
-        logger.error(f"Critical unhandled error in backtest task {self.request.id} for BR_ID {backtest_result_id}: {e}", exc_info=True)
+        return result
+    except SQLAlchemyError as sae: # Error with SessionLocal() or initial DB ops if any before _perform_backtest_logic
+        logger.exception(f"SQLAlchemyError in run_backtest_task {self.request.id} for BR_ID {backtest_result_id} (before main logic): {sae}")
+        # Attempt to mark BacktestResult as failed if possible
+        try:
+            if db_session: # db_session might not be valid if SessionLocal() failed
+                br_record = db_session.query(BacktestResult).filter(BacktestResult.id == backtest_result_id).first()
+                if br_record and br_record.status not in ["completed", "failed"]:
+                    br_record.status = "failed"; br_record.status_message = f"Task DB Setup Error: {str(sae)[:100]}"; db_session.commit()
+        except Exception as db_update_err:
+            logger.error(f"Further DB error updating BacktestResult {backtest_result_id} after task setup SQLAlchemyError: {db_update_err}", exc_info=True)
+        return {"status": "error", "message": f"Database setup error in backtest task: {sae}"}
+    except Exception as e: # General errors not caught by _perform_backtest_logic or initial setup
+        logger.exception(f"Critical unhandled error in backtest task {self.request.id} for BR_ID {backtest_result_id}: {e}")
         try:
             if db_session:
                 br_record = db_session.query(BacktestResult).filter(BacktestResult.id == backtest_result_id).first()
@@ -240,7 +292,7 @@ def run_backtest_task(self, backtest_result_id: int, user_id: int, strategy_id: 
                     br_record.pnl = 0 
                     br_record.updated_at = datetime.datetime.utcnow()
                     db_session.commit()
-        except Exception as db_err:
+        except Exception as db_err: # Nested try-except for status update
             logger.error(f"DB error updating BacktestResult {backtest_result_id} on critical task error: {db_err}", exc_info=True)
         return {"status": "error", "message": f"Critical error during backtest task execution: {e}"}
     finally:
@@ -275,13 +327,19 @@ def send_email_task(self, to_email: str, subject:str, body: str):
         
         logger.info(f"Celery task successfully sent email to {to_email} with subject '{subject}'.")
         return {"status": "success", "message": "Email sent successfully by Celery."}
-    except Exception as e:
-        logger.error(f"Celery task failed to send email to {to_email}: {e}", exc_info=True)
-        # Retry the task if it's a known transient error, otherwise let it fail
-        # For SMTP, connection errors or temporary auth issues might be retried.
+    except (smtplib.SMTPAuthenticationError, smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, socket.gaierror) as smtp_e:
+        logger.error(f"SMTP error sending email to {to_email}: {smtp_e}", exc_info=True)
+        try:
+            self.retry(exc=smtp_e)
+        except Exception as retry_exc: # Catch MaxRetriesExceededError
+             logger.error(f"Celery task send_email_task failed after retries for {to_email} due to SMTP error: {retry_exc}", exc_info=True)
+             raise # Re-raise the exception to mark the task as failed
+        raise # Re-raise the exception to mark the task as failed if not retrying
+    except Exception as e: # General fallback for other errors
+        logger.exception(f"Unexpected error in send_email_task for {to_email}: {e}")
         try:
             self.retry(exc=e)
         except Exception as retry_exc: # Catch MaxRetriesExceededError
-             logger.error(f"Celery task send_email_task failed after retries for {to_email}: {retry_exc}", exc_info=True)
-             raise # Re-raise the exception to mark the task as failed
-        raise # Re-raise the exception to mark the task as failed if not retrying (e.g. first attempt)
+             logger.error(f"Celery task send_email_task failed after retries for {to_email} due to unexpected error: {retry_exc}", exc_info=True)
+             raise
+        raise

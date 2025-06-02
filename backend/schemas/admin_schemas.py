@@ -73,9 +73,23 @@ class AdminStrategyUpdateRequest(BaseModel):
 
 
 # --- Admin Site Settings Schemas ---
-class AdminSiteSettingsResponse(BaseModel):
+class AdminSiteSettingsView(BaseModel): # For viewing config.py settings (read-only from backend perspective)
     status: str
     settings: dict[str, Any]
+
+class SystemSettingItem(BaseModel):
+    key: str
+    value: str
+    description: Optional[str] = None
+    updated_at: datetime.datetime
+
+class SystemSettingsListResponse(BaseModel):
+    status: str
+    system_settings: List[SystemSettingItem]
+
+class SystemSettingUpdateRequest(BaseModel):
+    value: str
+    description: Optional[str] = None
 
 class ReferralCommissionRateUpdateRequest(BaseModel):
     new_rate: float = Field(..., gt=0, lt=1, description="New referral commission rate, e.g., 0.1 for 10%. Must be between 0 and 1 (exclusive of 0).")
@@ -113,6 +127,11 @@ class AdminSubscriptionListResponse(BaseModel):
     page: int
     per_page: int
     total_pages: int
+
+class AdminSubscriptionDetailResponse(BaseModel): # For the GET by ID endpoint
+    status: str
+    subscription: Optional[AdminSubscriptionItem] = None # Matches the service return structure
+    message: Optional[str] = None # For errors like "not found" if status is error
 
 class AdminSubscriptionUpdateRequest(BaseModel):
     new_status_message: Optional[str] = Field(None, max_length=255)

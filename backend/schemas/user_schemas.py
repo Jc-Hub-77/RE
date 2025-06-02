@@ -99,7 +99,8 @@ class PasswordChange(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 class PasswordReset(BaseModel):
-    token: str
+    email: EmailStr # Added email field for user lookup
+    token: str # This will be the plain token received by the user
     new_password: str = Field(..., min_length=8)
 
 class EmailVerificationRequest(BaseModel):

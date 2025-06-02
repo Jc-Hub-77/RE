@@ -1,6 +1,9 @@
 // frontend/admin/js/admin_payments.js
 console.log("admin_payments.js loaded");
 
+// Configuration for pagination
+const ADMIN_PAYMENTS_PER_PAGE = 15; // Number of payment records to fetch per page
+
 document.addEventListener('DOMContentLoaded', () => {
     const authToken = localStorage.getItem('authToken');
     const isAdmin = localStorage.getItem('isAdmin') === 'true';
@@ -21,7 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const nextPageButton = document.getElementById('nextPage');
     const pageInfo = document.getElementById('pageInfo');
     let currentPage = 1;
-    const perPage = 15; // Or make this configurable
+    // const perPage = 15; // Moved to constant ADMIN_PAYMENTS_PER_PAGE
 
     async function fetchAdminPayments(page = 1) {
         if (!paymentsTableBody) return;
@@ -32,7 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const filterStatus = document.getElementById('filterStatus') ? document.getElementById('filterStatus').value : '';
         const filterGateway = document.getElementById('filterGateway') ? document.getElementById('filterGateway').value : '';
 
-        let queryParams = `page=${page}&per_page=${perPage}`;
+        let queryParams = `page=${page}&per_page=${ADMIN_PAYMENTS_PER_PAGE}`;
         if (filterUserId) queryParams += `&user_id=${encodeURIComponent(filterUserId)}`;
         if (filterStatus) queryParams += `&status=${encodeURIComponent(filterStatus)}`;
         if (filterGateway) queryParams += `&gateway=${encodeURIComponent(filterGateway)}`;
