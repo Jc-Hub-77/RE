@@ -173,7 +173,7 @@ def create_coinbase_commerce_charge(db_session: Session, user_id: int,
         created_at=datetime.datetime.utcnow(), 
         updated_at=datetime.datetime.utcnow(),
         description=charge_description, # Store detailed description
-        # charge_metadata_json=json.dumps(metadata_for_charge) # IDEAL: if model had this field
+        gateway_metadata_json=json.dumps(metadata_for_charge)
     )
     try:
         db_session.add(new_payment)
@@ -256,9 +256,22 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
 
     if payment_transaction.status == "completed": # Final state, no further processing needed
         logger.info(f"Webhook Info: Charge {gateway_charge_id} (Payment ID: {payment_transaction.id}) already processed as completed.")
-        return {"status": "success", "message": "Already completed."}, 200
+        # Even if completed, let's store the latest webhook data if it's different or new.
+        # This ensures we always have the most recent gateway perspective.
+        payment_transaction.gateway_metadata_json = request_body_str
+        # We can commit this change without further processing if status is already completed.
+        try:
+            db_session.commit()
+            logger.info(f"Webhook: Updated gateway_metadata_json for already completed TxID {payment_transaction.id}")
+        except Exception as e:
+            db_session.rollback()
+            logger.error(f"DB error updating gateway_metadata_json for completed TxID {payment_transaction.id}: {e}", exc_info=True)
+            # Non-critical error, so we can still return success for the webhook acknowledgement.
+        return {"status": "success", "message": "Already completed, metadata updated."}, 200
 
     # Update payment transaction based on webhook
+    payment_transaction.gateway_metadata_json = request_body_str # Store the raw webhook payload
+
     # Example: pricing.local.amount, pricing.local.currency for final amount
     # payments[0].value.local.amount for actual payment amount
     # payments[0].value.crypto.amount, payments[0].value.crypto.currency for crypto details
@@ -387,15 +400,36 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
         
         reconstructed_metadata = {}
         try:
-            # Attempt to reconstruct metadata. This is highly dependent on how it was stored.
-            # Ideal: transaction.charge_metadata_json (if model was updated)
-            # Fallback: parse from transaction.description
-            if transaction.description:
-                # This is a basic attempt; real parsing might be more complex
+            # Attempt to reconstruct metadata.
+            # Priority 1: Use gateway_metadata_json (which should contain the original charge creation metadata)
+            if transaction.gateway_metadata_json:
+                try:
+                    # The gateway_metadata_json stored during charge creation is the 'metadata' object itself.
+                    # For webhooks, the full webhook is stored. We need to differentiate or pick the right one.
+                    # The one stored at charge creation is more relevant for this reconstruction.
+                    # Let's assume the one from charge creation is a JSON dict of the metadata.
+                    parsed_gateway_json = json.loads(transaction.gateway_metadata_json)
+                    if isinstance(parsed_gateway_json, dict) and 'internal_transaction_ref' in parsed_gateway_json:
+                        # This looks like the metadata stored at charge creation
+                        reconstructed_metadata = parsed_gateway_json
+                        logger.info(f"Reconstructed metadata for TxID {transaction.id} from gateway_metadata_json (charge creation): {reconstructed_metadata}")
+                    elif isinstance(parsed_gateway_json, dict) and 'event' in parsed_gateway_json and 'data' in parsed_gateway_json['event']:
+                        # This looks like a full webhook payload. Extract metadata from it.
+                        reconstructed_metadata = parsed_gateway_json['event']['data'].get('metadata', {})
+                        logger.info(f"Reconstructed metadata for TxID {transaction.id} from gateway_metadata_json (webhook event): {reconstructed_metadata}")
+                    else:
+                        logger.warning(f"TxID {transaction.id}: gateway_metadata_json is present but not in expected charge metadata or webhook format. Content: {transaction.gateway_metadata_json[:200]}")
+                        # Fall through to description parsing if format is unrecognized
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse gateway_metadata_json for TxID {transaction.id}: {e}. Content: {transaction.gateway_metadata_json[:200]}")
+                    # Fall through to description parsing
+
+            # Priority 2: Fallback to parsing from transaction.description if metadata not found or failed to parse above
+            if not reconstructed_metadata and transaction.description:
+                logger.info(f"TxID {transaction.id}: Attempting to reconstruct metadata from description as gateway_metadata_json was not used or suitable.")
                 desc_metadata_prefix = "Metadata: {" 
                 if desc_metadata_prefix in transaction.description:
                     metadata_json_str = transaction.description[transaction.description.find(desc_metadata_prefix) + len(desc_metadata_prefix)-1:]
-                    # Ensure closing brace is found and extract
                     brace_level = 0
                     end_index = -1
                     for i, char in enumerate(metadata_json_str):
@@ -409,13 +443,12 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
                             logger.info(f"Reconstructed metadata for TxID {transaction.id} from description: {reconstructed_metadata}")
                         except json.JSONDecodeError as e:
                             logger.error(f"Failed to parse metadata from description for TxID {transaction.id}: {e}. Description: {metadata_json_str}")
-                            reconstructed_metadata = {} # Ensure it's a dict
-                    else: # Fallback if metadata not in description or format is unexpected
-                        logger.warning(f"Could not find complete metadata JSON in description for TxID {transaction.id}. Using default/fallback values if possible.")
+                    else: 
+                        logger.warning(f"Could not find complete metadata JSON in description for TxID {transaction.id}.")
                 else:
                      logger.warning(f"Metadata marker not found in description for TxID {transaction.id}")
             
-            # Ensure essential fields for _process_successful_payment are present
+            # Ensure essential fields for _process_successful_payment are present, filling from transaction if not in metadata
             if 'user_id' not in reconstructed_metadata and transaction.user_id:
                 reconstructed_metadata['user_id'] = str(transaction.user_id)
             if 'payment_amount_usd' not in reconstructed_metadata and transaction.usd_equivalent:

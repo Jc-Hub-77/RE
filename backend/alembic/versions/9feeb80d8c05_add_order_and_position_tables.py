@@ -1,7 +1,7 @@
 """add order and position tables
 
 Revision ID: 9feeb80d8c05
-Revises: 
+Revises: None
 Create Date: 2025-05-21 11:32:59.140217
 
 """
@@ -14,7 +14,7 @@ import datetime # Added for default datetimes
 
 # revision identifiers, used by Alembic.
 revision: str = '9feeb80d8c05'
-down_revision: Union[str, None] = 'dc7a444085b0'
+down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
