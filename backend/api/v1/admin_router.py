@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
-from backend.schemas import admin_schemas, user_schemas, strategy_schemas # Added strategy_schemas
-from backend.services import admin_service, user_service, strategy_service # Added strategy_service
+from backend.schemas import admin_schemas, user_schemas, strategy_schemas, referral_schemas # Added referral_schemas
+from backend.services import admin_service, user_service, strategy_service, referral_service # Added referral_service
 from backend.dependencies import get_current_active_admin_user, get_current_active_user # Added get_current_active_user for consistency if needed
 from backend.models import User, UserStrategySubscription # Added UserStrategySubscription for counts
 from backend.db import get_db
@@ -193,11 +193,59 @@ async def admin_restart_strategy_subscription(
         "subscription_id": subscription_id
     }
 
+# --- Admin Referral Payout History Endpoint ---
+@router.get("/referrals/payout-history", response_model=referral_schemas.AdminReferralPayoutHistoryResponse, dependencies=[Depends(get_current_active_admin_user)])
+async def admin_get_referral_payout_history_endpoint(
+    db: Session = Depends(get_db),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    sort_by: Optional[str] = Query("payout_initiated_at", description="Sort by: log_id, referral_id, admin_username, amount_paid, payout_initiated_at"),
+    sort_order: Optional[str] = Query("desc", enum=["asc", "desc"]),
+    referral_id_filter: Optional[int] = Query(None, description="Filter by specific referral ID"),
+    admin_user_id_filter: Optional[int] = Query(None, description="Filter by specific admin user ID who initiated payout")
+):
+    """
+    Admin endpoint to retrieve a paginated history of referral commission payouts.
+    """
+    # current_admin object is not strictly needed here as service does not require performing_admin_id for reads
+    # but get_current_active_admin_user in dependencies ensures this is an admin-only route.
+    result = referral_service.admin_get_referral_payout_history(
+        db_session=db,
+        page=page,
+        per_page=per_page,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        referral_id_filter=referral_id_filter,
+        admin_user_id_filter=admin_user_id_filter
+    )
+    # The service function is expected to return a dict matching AdminReferralPayoutHistoryResponse structure
+    # or handle its own errors internally if something goes wrong at DB level.
+    # If service could return {"status": "error"}, that would need handling here.
+    # Assuming it returns the correct structure or raises an exception that FastAPI handles.
+    return result
 
 # --- Admin Site Settings Endpoint ---
 @router.get("/site-settings", response_model=admin_schemas.AdminSiteSettingsResponse, dependencies=[Depends(get_current_active_admin_user)])
 async def admin_get_site_settings():
     result = admin_service.get_site_settings_admin()
+    return result
+
+@router.put("/settings/referral-commission-rate", response_model=user_schemas.GeneralResponse, dependencies=[Depends(get_current_active_admin_user)])
+async def admin_update_referral_commission_rate_endpoint(
+    payload: admin_schemas.ReferralCommissionRateUpdateRequest,
+    db: Session = Depends(get_db),
+    current_admin: user_schemas.User = Depends(get_current_active_admin_user)
+):
+    """
+    Admin endpoint to update the global referral commission rate.
+    """
+    result = admin_service.admin_update_referral_commission_rate(
+        db_session=db,
+        new_rate=payload.new_rate,
+        performing_admin_id=current_admin.id
+    )
+    if result["status"] == "error":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
     return result
 
 # --- Admin Dashboard Data ---

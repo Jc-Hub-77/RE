@@ -52,6 +52,9 @@ class UserStrategySubscriptionCreateRequest(BaseModel):
     custom_parameters: Dict[str, Any] = Field(..., alias="customParameters")
     subscription_months: int = Field(1, ge=1, le=12, alias="subscriptionMonths")
 
+class UserSubscriptionUpdateParamsRequest(BaseModel):
+    custom_parameters: Dict[str, Any] = Field(..., description="New set of custom parameters for the subscription.")
+
 class UserStrategySubscriptionResponseData(BaseModel):
     subscription_id: int
     strategy_id: int # DB ID of the strategy
@@ -76,6 +79,27 @@ class UserStrategySubscriptionActionResponse(BaseModel):
 class UserStrategySubscriptionListResponse(BaseModel):
     status: str
     subscriptions: List[UserStrategySubscriptionResponseData]
+
+# Response model for a single, detailed user subscription
+class UserStrategySubscriptionDetailResponse(BaseModel):
+    id: int # This is the UserStrategySubscription.id
+    user_id: int
+    strategy_id: int
+    strategy_name: str
+    api_key_id: Optional[int] = None
+    api_key_label: Optional[str] = None # Will come from joined ApiKey.label
+    custom_parameters: Dict[str, Any]
+    is_active: bool # This should reflect the calculated is_currently_active status
+    db_is_active_flag: Optional[bool] = None # The raw flag from DB, can be useful for frontend debug
+    status_message: Optional[str] = None
+    subscribed_at: Optional[datetime.datetime] = None
+    expires_at: Optional[datetime.datetime] = None
+    time_remaining_seconds: Optional[int] = None
+    celery_task_id: Optional[str] = None
+    is_currently_active: bool # Explicitly adding as requested by task for clarity in response
+
+    class Config:
+        model_config = { "from_attributes": True }
 
 class BacktestResultResponse(BaseModel):
     status: str

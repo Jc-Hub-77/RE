@@ -10,7 +10,7 @@ import sqlalchemy.types
 import json
 import importlib.util # Added for strategy validation
 
-from backend.models import User, Strategy, UserStrategySubscription, PaymentTransaction, ApiKey
+from backend.models import User, Strategy, UserStrategySubscription, PaymentTransaction, ApiKey, SystemSetting # Added SystemSetting
 from backend.services import live_trading_service # Added live_trading_service
 from backend.config import settings
 
@@ -460,6 +460,38 @@ def update_site_setting_admin(setting_key: str, setting_value: str):
 
     logger.info(f"Admin: Simulated attempt to update site setting '{setting_key}' to '{setting_value}'. This is not implemented for direct .env modification.")
     return {"status": "info_simulated", "message": f"Updating setting '{setting_key}' is conceptual. Direct modification of environment variables at runtime is not supported through this function."}
+
+def admin_update_referral_commission_rate(db_session: Session, new_rate: float, performing_admin_id: int):
+    """
+    Updates the global referral commission rate in system settings.
+    """
+    if not (0 < new_rate < 1): # Rate should be like 0.1 for 10%. Max < 100%
+        logger.warning(f"Admin ID {performing_admin_id} attempt to set invalid referral commission rate: {new_rate}.")
+        return {"status": "error", "message": "New rate must be between 0 and 1 (e.g., 0.1 for 10%)."}
+
+    setting_key = "referral_commission_rate"
+    try:
+        setting = db_session.query(SystemSetting).filter(SystemSetting.key == setting_key).first()
+        if setting:
+            setting.value = str(new_rate)
+            setting.updated_at = datetime.datetime.utcnow()
+            logger.info(f"Admin ID {performing_admin_id} updated existing referral commission rate to: {new_rate}.")
+        else:
+            setting = SystemSetting(
+                key=setting_key,
+                value=str(new_rate),
+                description="Global referral commission rate. E.g., 0.1 means 10%.",
+                updated_at=datetime.datetime.utcnow()
+            )
+            db_session.add(setting)
+            logger.info(f"Admin ID {performing_admin_id} created new referral commission rate setting: {new_rate}.")
+        
+        db_session.commit()
+        return {"status": "success", "message": f"Referral commission rate successfully updated to {new_rate:.2f}."}
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Admin ID {performing_admin_id}: Error updating referral commission rate to {new_rate}: {e}", exc_info=True)
+        return {"status": "error", "message": "Database error while updating referral commission rate."}
 
 
 # --- Admin Subscription Restart ---
