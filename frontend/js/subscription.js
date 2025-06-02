@@ -54,6 +54,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     const timeRemaining = isActive ? formatTimeRemaining(sub.time_remaining_seconds) : 'Expired';
                     const statusMessageText = sub.status_message || (isActive ? 'Running' : 'Inactive/Expired');
 
+                    let renewalOptionsHtml = '<p>Loading renewal options...</p>'; // Placeholder
+
                     itemDiv.innerHTML = `
                         <h4>${sub.strategy_name}</h4>
                         <div class="subscription-details">
@@ -62,21 +64,14 @@ document.addEventListener('DOMContentLoaded', () => {
                             <p><small>Subscription ID: ${sub.subscription_id} | API Key ID: ${sub.api_key_id}</small></p>
                             <p><small>Celery Task ID: ${sub.celery_task_id || 'N/A'}</small></p>
                         </div>
-                        <button class="btn btn-sm renew-strategy-sub-btn mt-1" 
-                                data-sub-id="${sub.subscription_id}" 
-                                data-item-name="${sub.strategy_name} Renewal"
-                                data-item-type="renew_strategy_subscription"
-                                data-item-description="1 Month Renewal for ${sub.strategy_name}"
-                                data-amount-usd="10.00" 
-                                data-subscription-months="1"> 
-                            Renew ($10.00)
-                        </button>
-                    `; // Added data-subscription-months
+                        <div class="renewal-options" id="renewal-options-${sub.subscription_id}">
+                            ${renewalOptionsHtml}
+                        </div>
+                    `;
                     activeStrategySubsList.appendChild(itemDiv);
+                    fetchAndRenderRenewalOptions(sub); // New function call
                 });
-                document.querySelectorAll('.renew-strategy-sub-btn').forEach(button => {
-                    button.addEventListener('click', handleGenericRenewInitiation);
-                });
+                // Event listener will be added dynamically after options are rendered in fetchAndRenderRenewalOptions
             } else {
                 activeStrategySubsList.innerHTML = '<p>No active strategy subscriptions found.</p>';
                 if (data.status !== "success") throw new Error(data.message || "Failed to parse subscriptions.");
@@ -110,12 +105,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 if(platformPlanExpiry) platformPlanExpiry.textContent = sub.expires_at ? new Date(sub.expires_at).toLocaleDateString() : "N/A";
                 if(renewPlatformSubBtn) {
                     renewPlatformSubBtn.style.display = 'inline-block'; // Make it visible
-                    renewPlatformSubBtn.dataset.itemId = sub.plan_id || "platform_basic_annual"; // Assuming plan_id exists
+                    // NOTE: Platform subscription renewal options are currently hardcoded below.
+                    // For dynamic platform tiers, a backend endpoint providing these options would be needed.
+                    renewPlatformSubBtn.dataset.itemId = sub.plan_id || "platform_basic_annual"; // Example plan ID
                     renewPlatformSubBtn.dataset.itemName = `${sub.plan_name || "Platform"} Renewal`;
-                    renewPlatformSubBtn.dataset.itemType = "platform_subscription_renewal"; // Specific item type
-                    renewPlatformSubBtn.dataset.itemDescription = `1 Year Renewal for ${sub.plan_name || "Platform"}`;
-                    renewPlatformSubBtn.dataset.amountUsd = "99.00"; // Example, should come from plan details
-                    renewPlatformSubBtn.dataset.subscriptionMonths = "12";
+                    renewPlatformSubBtn.dataset.itemType = "platform_subscription_renewal"; 
+                    renewPlatformSubBtn.dataset.itemDescription = `1 Year Renewal for ${sub.plan_name || "Platform Subscription"}`;
+                    renewPlatformSubBtn.dataset.amountUsd = "99.00"; // Hardcoded example price for platform renewal
+                    renewPlatformSubBtn.dataset.subscriptionMonths = "12"; // Hardcoded example duration
                 }
             } else { 
                 if(platformPlanName) platformPlanName.textContent = "Free Tier / None";
@@ -250,5 +247,48 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error("User not authenticated. Cannot display subscription page.");
         // Optionally, clear parts of the page or show a login prompt.
         if(activeStrategySubsList) activeStrategySubsList.innerHTML = '<p>Please login to view your subscriptions.</p>';
+    }
+
+    async function fetchAndRenderRenewalOptions(subscription) {
+        const optionsContainer = document.getElementById(`renewal-options-${subscription.subscription_id}`);
+        if (!optionsContainer) return;
+
+        try {
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/strategies/${subscription.strategy_id}`, {
+                headers: { 'Authorization': `Bearer ${authToken}` }
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to fetch strategy details (HTTP ${response.status})`);
+            }
+            const strategyDetailsData = await response.json();
+
+            if (strategyDetailsData.status === "success" && strategyDetailsData.details && strategyDetailsData.details.payment_options && strategyDetailsData.details.payment_options.length > 0) {
+                let optionsHtml = '';
+                strategyDetailsData.details.payment_options.forEach(option => {
+                    optionsHtml += `
+                        <button class="btn btn-sm renew-strategy-sub-btn mt-1" 
+                                data-sub-id="${subscription.subscription_id}" 
+                                data-strategy-id="${subscription.strategy_id}"
+                                data-item-name="${subscription.strategy_name} Renewal"
+                                data-item-type="renew_strategy_subscription"
+                                data-item-description="${option.description || option.months + ' Month(s) Renewal'}"
+                                data-amount-usd="${option.price_usd.toFixed(2)}" 
+                                data-subscription-months="${option.months}">
+                            Renew for ${option.months} Month(s) ($${option.price_usd.toFixed(2)})
+                        </button>
+                    `;
+                });
+                optionsContainer.innerHTML = optionsHtml;
+                // Add event listeners to newly created buttons
+                optionsContainer.querySelectorAll('.renew-strategy-sub-btn').forEach(button => {
+                    button.addEventListener('click', handleGenericRenewInitiation);
+                });
+            } else {
+                optionsContainer.innerHTML = '<p><small>No renewal options available for this strategy.</small></p>';
+            }
+        } catch (error) {
+            console.error(`Error fetching renewal options for strategy ${subscription.strategy_id}:`, error);
+            optionsContainer.innerHTML = `<p><small>Error loading renewal options: ${error.message}</small></p>`;
+        }
     }
 });

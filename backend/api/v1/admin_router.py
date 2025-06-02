@@ -224,15 +224,35 @@ async def admin_get_referral_payout_history_endpoint(
     # Assuming it returns the correct structure or raises an exception that FastAPI handles.
     return result
 
-# --- Admin Site Settings Endpoint ---
-@router.get("/site-settings", response_model=admin_schemas.AdminSiteSettingsResponse, dependencies=[Depends(get_current_active_admin_user)])
-async def admin_get_site_settings():
-    result = admin_service.get_site_settings_admin()
+# --- Admin System Settings Endpoints ---
+@router.get("/system-settings", response_model=admin_schemas.SystemSettingsListResponse, dependencies=[Depends(get_current_active_admin_user)])
+async def admin_get_all_system_settings(db: Session = Depends(get_db)): # Added db
+    result = admin_service.get_all_system_settings_admin(db) # Pass db
+    if result["status"] == "error":
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message"))
     return result
 
-@router.put("/settings/referral-commission-rate", response_model=user_schemas.GeneralResponse, dependencies=[Depends(get_current_active_admin_user)])
+@router.put("/system-settings/{setting_key}", response_model=user_schemas.GeneralResponse, dependencies=[Depends(get_current_active_admin_user)])
+async def admin_update_specific_system_setting(
+    setting_key: str,
+    payload: admin_schemas.SystemSettingUpdateRequest, 
+    db: Session = Depends(get_db),
+    current_admin: user_schemas.User = Depends(get_current_active_admin_user)
+):
+    result = admin_service.update_system_setting_admin(
+        db_session=db,
+        setting_key=setting_key,
+        new_value=payload.value,
+        description=payload.description,
+        performing_admin_id=current_admin.id
+    )
+    if result["status"] == "error":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
+    return result
+
+@router.put("/settings/referral-commission-rate", response_model=user_schemas.GeneralResponse, dependencies=[Depends(get_current_active_admin_user)]) # Kept for convenience
 async def admin_update_referral_commission_rate_endpoint(
-    payload: admin_schemas.ReferralCommissionRateUpdateRequest,
+    payload: admin_schemas.ReferralCommissionRateUpdateRequest, # This specific endpoint can remain for convenience
     db: Session = Depends(get_db),
     current_admin: user_schemas.User = Depends(get_current_active_admin_user)
 ):
@@ -265,24 +285,11 @@ async def admin_dashboard_summary_route(db: Session = Depends(get_db)): # Rename
         # For now, assuming total_subscriptions from list_all_subscriptions_admin is all subs, not just active.
         # Let's make a placeholder assumption or add a new service call.
         # For now, let's count from the first page of results if small number.
-        # This should be properly implemented in admin_service.get_dashboard_summary_data()
-
-        # Placeholder: A proper service function should provide this directly.
-        # This is inefficient for many subscriptions.
-        all_subs_for_count = db.query(UserStrategySubscription).filter(UserStrategySubscription.is_active == True).count()
-        total_active_subscriptions = all_subs_for_count
-
-    strategies_data = admin_service.list_all_strategies_admin(db)
-    total_strategies = len(strategies_data.get("strategies", []))
-
-
-    summary_data = {
-        "totalUsers": total_users,
-        "totalRevenue": total_revenue, # Renamed from totalRevenueLast30d for clarity unless it's specifically 30d
-        "activeSubscriptions": total_active_subscriptions,
-        "totalStrategies": total_strategies
-    }
-    return {"status": "success", "summary": summary_data}
+    # This should be properly implemented in admin_service.get_dashboard_summary()
+    result = admin_service.get_dashboard_summary(db)
+    if result["status"] == "error":
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message", "Error generating dashboard summary."))
+    return result # The service now returns the full response structure
 
 # Removed duplicate public strategy endpoints from admin_router.
 # They should reside in strategy_router.py for public access.

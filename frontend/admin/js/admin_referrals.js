@@ -1,6 +1,9 @@
 // frontend/admin/js/admin_referrals.js
 console.log("admin_referrals.js loaded");
 
+// Configuration for pagination
+const ADMIN_REFERRALS_PER_PAGE = 15; // Number of referral records to fetch per page
+
 document.addEventListener('DOMContentLoaded', () => {
     const authToken = localStorage.getItem('authToken');
     const isAdmin = localStorage.getItem('isAdmin') === 'true';
@@ -25,7 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const filterReferralsButton = document.getElementById('filterReferralsButton');
 
     let currentReferralsPage = 1;
-    const referralsPerPage = 15; // Number of items per page
+    // const referralsPerPage = 15; // Moved to constant ADMIN_REFERRALS_PER_PAGE
 
     async function fetchAdminReferrals(page = 1) {
         if (!referralsTableBody) return;
@@ -35,7 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const referrerSearch = filterReferrerInput ? filterReferrerInput.value : '';
         const referredSearch = filterReferredInput ? filterReferredInput.value : '';
 
-        let queryParams = `page=${page}&per_page=${referralsPerPage}`;
+        let queryParams = `page=${page}&per_page=${ADMIN_REFERRALS_PER_PAGE}`;
         if (referrerSearch) queryParams += `&referrer_search=${encodeURIComponent(referrerSearch)}`;
         if (referredSearch) queryParams += `&referred_search=${encodeURIComponent(referredSearch)}`;
         // Add default sorting for consistency, can be made dynamic later

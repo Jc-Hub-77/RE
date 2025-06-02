@@ -347,13 +347,13 @@ def forgot_password_request(db_session: Session, email: str):
         # Still return success to prevent email enumeration
         return {"status": "success", "message": "If an account with this email exists, a password reset link has been sent."}
 
-    token, expires_at = _generate_secure_token_data(1) # Password reset tokens usually have shorter expiry (e.g., 1 hour)
-    user.password_reset_token = token # Store the plain token for lookup; consider hashing if desired for extra security layer
+    plain_token, expires_at = _generate_secure_token_data(1) # Password reset tokens usually have shorter expiry (e.g., 1 hour)
+    user.password_reset_token = _get_password_hash(plain_token) # Store the hashed token
     user.password_reset_token_expires_at = expires_at
     
     try:
         db_session.commit()
-        reset_link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+        reset_link = f"{settings.FRONTEND_URL}/reset-password?token={plain_token}&email={user.email}" # Include email in reset link query params for convenience on frontend
         email_subject = f"Password Reset Request for {settings.PROJECT_NAME}"
         email_body = (
             f"Hi {user.username},\n\n"
@@ -370,23 +370,36 @@ def forgot_password_request(db_session: Session, email: str):
         logger.error(f"Error processing password reset request for {email}: {e}", exc_info=True)
         return {"status": "error", "message": "Error processing password reset request."}
 
-def reset_password_with_token(db_session: Session, token: str, new_password: str):
-    if not token or not new_password:
-        return {"status": "error", "message": "Token and new password are required."}
+def reset_password_with_token(db_session: Session, email: str, plain_token: str, new_password: str):
+    if not email or not plain_token or not new_password:
+        return {"status": "error", "message": "Email, token, and new password are required."}
     if len(new_password) < 8:
         return {"status": "error", "message": "New password must be at least 8 characters."}
 
-    user = db_session.query(User).filter(User.password_reset_token == token).first()
+    user = get_user_by_email(db_session, email)
 
     if not user:
-        logger.warning(f"Invalid or non-existent password reset token used: {token}")
-        return {"status": "error", "message": "Invalid or expired password reset token."}
+        logger.warning(f"Password reset attempt for non-existent email: {email}")
+        return {"status": "error", "message": "Invalid email or token."} # Generic message
+        
+    if not user.password_reset_token or not user.password_reset_token_expires_at:
+        logger.warning(f"User {email} (ID: {user.id}) has no active password reset token.")
+        return {"status": "error", "message": "No active password reset request found or token already used."}
+
     if user.password_reset_token_expires_at < datetime.datetime.utcnow():
         logger.warning(f"Expired password reset token used for user {user.username} (ID: {user.id}).")
         user.password_reset_token = None # Clear expired token
         user.password_reset_token_expires_at = None
         db_session.commit()
         return {"status": "error", "message": "Password reset token has expired."}
+
+    if not _verify_password(plain_token, user.password_reset_token):
+        logger.warning(f"Invalid password reset token provided for user {user.username} (ID: {user.id}).")
+        # Optionally, clear the token to prevent reuse of a guessed-but-wrong token against a valid hash
+        # user.password_reset_token = None
+        # user.password_reset_token_expires_at = None
+        # db_session.commit()
+        return {"status": "error", "message": "Invalid or expired password reset token."}
 
     user.password_hash = _get_password_hash(new_password)
     user.last_password_change_at = datetime.datetime.utcnow()
@@ -448,8 +461,8 @@ def request_new_verification_email(db_session: Session, email: str):
         return {"status": "error", "message": "Database error resending verification email."}
 
 # `manage_security_settings` placeholder - kept for conceptual completeness from original file
-def manage_security_settings(user_id, settings_data): 
-    logger.info(f"Placeholder: Managing security settings for user_id: {user_id} with settings: {settings_data}")
-    # Actual implementation would involve 2FA setup, activity logs, etc.
+def manage_security_settings(user_id: int, settings_data: dict): # Added type hints for clarity
+    logger.info(f"Placeholder function manage_security_settings called for user_id: {user_id} with settings: {settings_data}")
+    # Actual implementation would involve 2FA setup, activity logs, password policies etc.
     # This is a complex feature and is out of scope for current service completion.
-    return {"status": "success_placeholder", "message": "Security settings management is conceptual here."}
+    return {"status": "info", "message": "Security settings management (e.g., 2FA, active sessions) is a planned feature and not yet implemented."}

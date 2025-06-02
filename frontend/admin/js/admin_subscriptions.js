@@ -1,6 +1,9 @@
 // frontend/admin/js/admin_subscriptions.js
 console.log("admin_subscriptions.js loaded");
 
+// Configuration for pagination
+const ADMIN_SUBSCRIPTIONS_PER_PAGE = 15; // Number of subscription records to fetch per page
+
 document.addEventListener('DOMContentLoaded', () => {
     const authToken = localStorage.getItem('authToken');
     const isAdmin = localStorage.getItem('isAdmin') === 'true';
@@ -26,7 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // const filterSubscriptionsButton = document.getElementById('filterSubscriptionsButton');
 
     let currentSubscriptionsPage = 1;
-    const subscriptionsPerPage = 15;
+    // const subscriptionsPerPage = 15; // Moved to constant ADMIN_SUBSCRIPTIONS_PER_PAGE
 
     async function fetchAdminSubscriptions(page = 1) {
         if (!subscriptionsTableBody) return;
@@ -43,7 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Assuming a general admin endpoint for all subscriptions exists or will be created
         // For now, using a placeholder. This endpoint would need to be implemented in the backend.
         // Based on admin_service.py, it should be something like:
-        let queryParams = `page=${page}&per_page=${subscriptionsPerPage}`;
+        let queryParams = `page=${page}&per_page=${ADMIN_SUBSCRIPTIONS_PER_PAGE}`;
 
 
         try {
@@ -197,4 +200,31 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
         if(subscriptionsTableBody) subscriptionsTableBody.innerHTML = '<tr><td colspan="9" style="text-align:center;">Access Denied. Please login as admin.</td></tr>';
     }
+
+    // --- Modal and Edit Logic Description (as per subtask) ---
+    // To replace prompt()-based editing in handleAdminEditSubscription(subData):
+    // 1. HTML Modal:
+    //    - A hidden modal element would be added to admin_subscriptions.html.
+    //    - It would contain a form with input fields for: Status Message (text), 
+    //      Expires At (datetime-local or text with YYYY-MM-DDTHH:MM:SS format instruction), 
+    //      and Is Active (checkbox/select).
+    //    - A hidden input for 'subscriptionId'.
+    //    - "Save" and "Cancel" buttons.
+    // 2. openSubscriptionEditModal(subscriptionData):
+    //    - Takes subscriptionData as an argument.
+    //    - Populates the modal form fields with data from subscriptionData.
+    //    - Stores subscriptionData.id in the hidden input.
+    //    - Displays the modal.
+    // 3. Modal "Save" Button Listener:
+    //    - Prevents default form submission.
+    //    - Collects data from modal form inputs.
+    //    - Constructs the payload object (new_status_message, new_expires_at_str, new_is_active)
+    //      similar to how it's done in the current handleAdminEditSubscription after prompts.
+    //    - Performs basic frontend validation (e.g., date format if entered as text).
+    //    - Makes the PUT request to `/api/v1/admin/subscriptions/{sub_id}/details` using the collected data.
+    //    - Handles API response, shows success/error messages, and closes the modal.
+    //    - Refreshes the subscriptions list on success.
+    // 4. Modal "Cancel" Button: Hides the modal.
+    // The "Edit" button's onclick in fetchAdminSubscriptions would be changed to call openSubscriptionEditModal(sub).
+    // The core API call logic within the current handleAdminEditSubscription (the fetch part) would be reused.
 });

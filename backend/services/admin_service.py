@@ -474,32 +474,67 @@ def get_site_settings_admin():
        "COINBASE_COMMERCE_API_KEY_SET": bool(settings.COINBASE_COMMERCE_API_KEY),
        "ENVIRONMENT": os.getenv("ENVIRONMENT", "Not Set")
     }
-    return {"status": "success", "settings": settings_dict}
+    return {"status": "success", "settings": settings_dict} # This can be kept for read-only view of config.py settings
 
-def update_site_setting_admin(setting_key: str, setting_value: str):
-    # This remains conceptual as modifying .env or runtime os.environ is complex and risky via API.
-    # Such changes should ideally trigger a configuration reload or app restart,
-    # which is beyond the scope of this function.
-    sensitive_keys = [
-        "DATABASE_URL", "JWT_SECRET_KEY", "SMTP_PASSWORD", 
-        "API_ENCRYPTION_KEY", "COINBASE_COMMERCE_API_KEY", "COINBASE_COMMERCE_WEBHOOK_SECRET"
-    ]
-    if setting_key in sensitive_keys:
-         logger.warning(f"Admin: Attempt to update sensitive setting '{setting_key}' via API was blocked.")
-         return {"status": "error", "message": f"Setting '{setting_key}' is sensitive and cannot be updated via API for security reasons."}
+def get_all_system_settings_admin(db_session: Session):
+    """Retrieves all system settings from the database."""
+    try:
+        settings_db = db_session.query(SystemSetting).all()
+        settings_list = [
+            {"key": s.key, "value": s.value, "description": s.description, "updated_at": s.updated_at.isoformat()}
+            for s in settings_db
+        ]
+        return {"status": "success", "system_settings": settings_list}
+    except Exception as e:
+        logger.exception(f"Error retrieving all system settings: {e}")
+        return {"status": "error", "message": "Could not retrieve system settings."}
+
+def update_system_setting_admin(db_session: Session, setting_key: str, new_value: str, description: Optional[str] = None, performing_admin_id: Optional[int] = None):
+    """Updates or creates a system setting in the database."""
     
-    # Example: For non-sensitive, known settings that might be stored in DB or a mutable config object (not .env)
-    # if setting_key == "SOME_NON_SENSITIVE_SETTING":
-    #    try:
-    #        # Update logic here (e.g., save to a DB table for settings)
-    #        logger.info(f"Admin: Site setting '{setting_key}' updated to '{setting_value}'.")
-    #        return {"status": "success", "message": f"Setting '{setting_key}' updated."}
-    #    except Exception as e:
-    #        logger.error(f"Admin: Error updating site setting '{setting_key}': {e}", exc_info=True)
-    #        return {"status": "error", "message": f"Could not update setting '{setting_key}': {e}"}
+    # Basic validation for known numeric settings
+    known_numeric_settings = ["MAX_BACKTEST_DAYS_SYSTEM", "DEFAULT_BACKTEST_INITIAL_CAPITAL"]
+    known_float_settings = ["REFERRAL_COMMISSION_RATE", "DEFAULT_BACKTEST_INITIAL_CAPITAL"] # REFERRAL_COMMISSION_RATE handled by its own function
 
-    logger.info(f"Admin: Simulated attempt to update site setting '{setting_key}' to '{setting_value}'. This is not implemented for direct .env modification.")
-    return {"status": "info_simulated", "message": f"Updating setting '{setting_key}' is conceptual. Direct modification of environment variables at runtime is not supported through this function."}
+    if setting_key in known_numeric_settings and setting_key not in known_float_settings:
+        try:
+            int(new_value)
+        except ValueError:
+            return {"status": "error", "message": f"Setting '{setting_key}' must be an integer. Received: '{new_value}'."}
+    
+    if setting_key in known_float_settings:
+        try:
+            val = float(new_value)
+            if setting_key == "REFERRAL_COMMISSION_RATE" and not (0 < val < 1): # Specific validation for this key
+                 return {"status": "error", "message": "Referral commission rate must be between 0 and 1 (exclusive)."}
+        except ValueError:
+            return {"status": "error", "message": f"Setting '{setting_key}' must be a float. Received: '{new_value}'."}
+
+    try:
+        setting = db_session.query(SystemSetting).filter(SystemSetting.key == setting_key).first()
+        if setting:
+            setting.value = new_value
+            if description is not None: # Allow updating description
+                setting.description = description
+            setting.updated_at = datetime.datetime.utcnow()
+            action = "updated"
+        else:
+            setting = SystemSetting(
+                key=setting_key,
+                value=new_value,
+                description=description if description is not None else f"System setting for {setting_key}",
+                updated_at=datetime.datetime.utcnow()
+            )
+            db_session.add(setting)
+            action = "created"
+        
+        db_session.commit()
+        logger.info(f"Admin (ID: {performing_admin_id or 'Unknown'}) {action} system setting '{setting_key}' to value '{new_value}'.")
+        return {"status": "success", "message": f"System setting '{setting_key}' {action} successfully."}
+    except Exception as e:
+        db_session.rollback()
+        logger.exception(f"Error {action} system setting '{setting_key}': {e}")
+        return {"status": "error", "message": f"Database error while {action} system setting."}
 
 def admin_update_referral_commission_rate(db_session: Session, new_rate: float, performing_admin_id: int):
     """
@@ -558,3 +593,118 @@ def restart_strategy_subscription(db_session: Session, subscription_id: int, adm
         logger.error(f"Admin service call to restart subscription ID {subscription_id} failed. Reason: {restart_result.get('message')}")
 
     return restart_result
+
+def get_dashboard_summary(db_session: Session):
+    """
+    Aggregates data for the admin dashboard summary.
+    """
+    try:
+        total_users = db_session.query(User).count()
+        total_revenue = get_total_revenue(db_session) # Uses existing helper
+
+        now = datetime.datetime.utcnow()
+        active_subscriptions = db_session.query(UserStrategySubscription).filter(
+            UserStrategySubscription.is_active == True,
+            UserStrategySubscription.expires_at > now # Ensure subscription is not expired
+        ).count()
+        
+        # Alternative for active_subscriptions if you also want to include those with no expiry:
+        # active_subscriptions = db_session.query(UserStrategySubscription).filter(
+        #     UserStrategySubscription.is_active == True,
+        #     or_(
+        #         UserStrategySubscription.expires_at == None,
+        #         UserStrategySubscription.expires_at > now
+        #     )
+        # ).count()
+
+
+        total_strategies = db_session.query(Strategy).count()
+
+        # Placeholder for recent activities - this would require a more complex activity logging system
+        recent_activities = [
+            "User 'john_doe' registered.",
+            "Strategy 'EMA Crossover' was subscribed to by user 'jane_doe'.",
+            "Payment of $19.99 received from user 'john_doe'."
+        ] # Replace with actual activity logging if implemented
+
+        summary_data = {
+            "totalUsers": total_users,
+            "totalRevenue": total_revenue,
+            "activeSubscriptions": active_subscriptions,
+            "totalStrategies": total_strategies,
+            "recentActivities": recent_activities # Added placeholder
+        }
+        return {"status": "success", "summary": summary_data}
+    except Exception as e:
+        logger.error(f"Error generating admin dashboard summary: {e}", exc_info=True)
+        return {"status": "error", "message": "Could not generate dashboard summary."}
+
+def delete_strategy_admin(db_session: Session, strategy_id: int):
+    """Deletes a strategy from the database."""
+    strategy = db_session.query(Strategy).filter(Strategy.id == strategy_id).first()
+    if not strategy:
+        return {"status": "error", "message": "Strategy not found."}
+
+    # Optional: Check for active subscriptions before deleting
+    active_subscriptions_count = db_session.query(UserStrategySubscription).filter(
+        UserStrategySubscription.strategy_id == strategy_id,
+        UserStrategySubscription.is_active == True
+    ).count()
+
+    if active_subscriptions_count > 0:
+        logger.warning(f"Attempt to delete strategy ID {strategy_id} which has {active_subscriptions_count} active subscriptions.")
+        # Depending on policy, could prevent deletion or just log. For now, allowing deletion.
+        # To prevent: return {"status": "error", "message": f"Strategy has {active_subscriptions_count} active subscriptions. Cannot delete."}
+    
+    try:
+        db_session.delete(strategy)
+        db_session.commit()
+        logger.info(f"Admin: Strategy ID {strategy_id} ('{strategy.name}') deleted successfully.")
+        return {"status": "success", "message": "Strategy deleted successfully."}
+    except Exception as e: # Consider SQLAlchemyError for more specific DB errors
+        db_session.rollback()
+        logger.exception(f"Error deleting strategy ID {strategy_id}: {e}")
+        return {"status": "error", "message": f"Database error while deleting strategy: {str(e)}"}
+
+def get_subscription_details_admin(db_session: Session, subscription_id: int):
+    """Retrieves detailed information for a specific user subscription for admin view."""
+    try:
+        subscription = db_session.query(UserStrategySubscription)\
+            .join(User, UserStrategySubscription.user_id == User.id)\
+            .join(Strategy, UserStrategySubscription.strategy_id == Strategy.id)\
+            .outerjoin(ApiKey, UserStrategySubscription.api_key_id == ApiKey.id)\
+            .filter(UserStrategySubscription.id == subscription_id)\
+            .first()
+
+        if not subscription:
+            return {"status": "error", "message": "Subscription not found."}
+
+        # Attempt to parse custom_parameters JSON string into a dict
+        custom_parameters_dict = None
+        if subscription.custom_parameters:
+            try:
+                custom_parameters_dict = json.loads(subscription.custom_parameters)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse custom_parameters JSON for subscription {subscription.id}: {subscription.custom_parameters}", exc_info=True)
+                custom_parameters_dict = {"error": "Could not parse parameters"}
+        
+        # Constructing the detailed response
+        subscription_details = {
+            "id": subscription.id,
+            "user_id": subscription.user_id,
+            "username": subscription.user.username if subscription.user else None,
+            "strategy_id": subscription.strategy_id,
+            "strategy_name": subscription.strategy.name if subscription.strategy else None,
+            "api_key_id": subscription.api_key_id,
+            "api_key_label": subscription.api_key.label if subscription.api_key else None,
+            "is_active": subscription.is_active,
+            "subscribed_at": subscription.subscribed_at.isoformat() if subscription.subscribed_at else None,
+            "expires_at": subscription.expires_at.isoformat() if subscription.expires_at else None,
+            "custom_parameters": custom_parameters_dict, # Parsed dict or error
+            "status_message": subscription.status_message,
+            "celery_task_id": subscription.celery_task_id
+        }
+        return {"status": "success", "subscription": subscription_details}
+    except Exception as e:
+        logger.exception(f"Error retrieving subscription details for admin (ID: {subscription_id}): {e}")
+        return {"status": "error", "message": "Could not retrieve subscription details."}

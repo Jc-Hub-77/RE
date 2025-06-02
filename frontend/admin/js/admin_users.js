@@ -1,6 +1,9 @@
 // frontend/admin/js/admin_users.js
 console.log("admin_users.js loaded");
 
+// Configuration for pagination
+const ADMIN_USERS_PER_PAGE = 15; // Number of user records to fetch per page
+
 document.addEventListener('DOMContentLoaded', () => {
     const authToken = localStorage.getItem('authToken');
     const isAdmin = localStorage.getItem('isAdmin') === 'true';
@@ -24,14 +27,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const pageInfoUsers = document.getElementById('pageInfoUsers'); // Assumed ID
 
     let currentUsersPage = 1;
-    const usersPerPage = 15; 
+    // const usersPerPage = 15; // Moved to constant ADMIN_USERS_PER_PAGE
 
     async function fetchUsers(page = 1, searchTerm = '') {
         if (!usersTableBody) return;
         usersTableBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading users...</td></tr>`; // Colspan updated to 7
 
         currentUsersPage = page;
-        let queryParams = `page=${page}&per_page=${usersPerPage}`;
+        let queryParams = `page=${page}&per_page=${ADMIN_USERS_PER_PAGE}`;
         if (searchTerm) {
             queryParams += `&search_term=${encodeURIComponent(searchTerm)}`;
         }

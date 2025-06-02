@@ -8,6 +8,10 @@ function getCssVariable(varName) {
 
 // const BACKEND_API_BASE_URL = 'http://127.0.0.1:8000'; // Ensure this is correct - This will now be set globally via HTML script tag
 
+// Constants for backtest result polling
+const BACKTEST_POLL_INTERVAL_MS = 5000; // Interval in milliseconds for polling backtest results
+const BACKTEST_MAX_POLL_ATTEMPTS = 360;  // Maximum number of polling attempts (e.g., 360 * 5s = 30 minutes)
+
 document.addEventListener('DOMContentLoaded', () => {
     const authToken = localStorage.getItem('authToken');
     const userId = localStorage.getItem('userId');
@@ -282,19 +286,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function pollForBacktestResults(backtestId) {
-        const pollInterval = 5000;
-        const maxAttempts = 360;
         let attempts = 0;
 
         const intervalId = setInterval(async () => {
             attempts++;
-            if (attempts > maxAttempts) {
+            if (attempts > BACKTEST_MAX_POLL_ATTEMPTS) {
                 clearInterval(intervalId);
                 resultsLoading.textContent = 'Backtest timed out waiting for results.';
                 console.error(`Timeout polling for backtest ID ${backtestId}`);
                 return;
             }
-            resultsLoading.textContent = `Polling for results... (Attempt ${attempts}/${maxAttempts})`;
+            resultsLoading.textContent = `Polling for results... (Attempt ${attempts}/${BACKTEST_MAX_POLL_ATTEMPTS})`;
             try {
                 const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/backtests/${backtestId}`, {
                     headers: { 'Authorization': `Bearer ${authToken}` }
@@ -331,7 +333,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (error) {
                 console.error(`Error polling for backtest ID ${backtestId}:`, error);
             }
-        }, pollInterval);
+        }, BACKTEST_POLL_INTERVAL_MS);
     }
 
     function displayBacktestResults(results) {
