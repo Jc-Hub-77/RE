@@ -159,6 +159,40 @@ async def admin_update_subscription_details_route( # Renamed to avoid conflict
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
     return result
 
+@router.post("/subscriptions/{subscription_id}/restart", response_model=user_schemas.GeneralResponse, dependencies=[Depends(get_current_active_admin_user)])
+async def admin_restart_strategy_subscription(
+    subscription_id: int,
+    db: Session = Depends(get_db),
+    current_admin: user_schemas.User = Depends(get_current_active_admin_user) # Ensure admin is recognized
+):
+    """
+    Admin endpoint to restart a strategy subscription.
+    """
+    # The actual restart logic will be in admin_service.restart_strategy_subscription
+    # For now, we call it and can use its response if needed.
+    # This service function will need to be created in admin_service.py
+    if not hasattr(admin_service, 'restart_strategy_subscription'):
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Strategy subscription restart service not implemented."
+        )
+    
+    restart_result = admin_service.restart_strategy_subscription(db=db, subscription_id=subscription_id, admin_user_id=current_admin.id)
+
+    if restart_result["status"] == "error":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, # Or appropriate error code based on service logic
+            detail=restart_result.get("message", "Failed to restart subscription.")
+        )
+
+    # For now, returning a simple message. 
+    # The actual response might be shaped by what restart_result contains.
+    return {
+        "status": "success", # Or use status from restart_result
+        "message": f"Restart signal sent for subscription {subscription_id}. Result: {restart_result.get('message', 'OK')}",
+        "subscription_id": subscription_id
+    }
+
 
 # --- Admin Site Settings Endpoint ---
 @router.get("/site-settings", response_model=admin_schemas.AdminSiteSettingsResponse, dependencies=[Depends(get_current_active_admin_user)])
