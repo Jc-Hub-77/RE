@@ -321,6 +321,18 @@ def change_password(db_session: Session, user_id: int, old_password: str, new_pa
     try:
         db_session.commit()
         logger.info(f"Password changed successfully for user {user.username} (ID: {user.id}).")
+
+        # Send password change notification email
+        email_subject = "Your Password Has Been Changed"
+        email_body = (
+            f"Hi {user.username},\n\n"
+            f"This email confirms that the password for your {settings.PROJECT_NAME} account was recently changed.\n\n"
+            f"If you did not make this change, please contact our support team immediately.\n\n"
+            f"Thanks,\nThe {settings.PROJECT_NAME} Team"
+        )
+        send_email_task.delay(to_email=user.email, subject=email_subject, body=email_body)
+        logger.info(f"Password change notification email queued for {user.email}.")
+
         # TODO: Invalidate other active sessions/tokens for this user (e.g., by managing a token blacklist or session store)
         return {"status": "success", "message": "Password changed successfully."}
     except Exception as e:
@@ -385,7 +397,18 @@ def reset_password_with_token(db_session: Session, token: str, new_password: str
     try:
         db_session.commit()
         logger.info(f"Password reset successfully for user {user.username} (ID: {user.id}) using token.")
-        # TODO: Consider sending a confirmation email that password was changed.
+
+        # Send password reset confirmation email
+        email_subject = "Your Password Has Been Reset"
+        email_body = (
+            f"Hi {user.username},\n\n"
+            f"This email confirms that the password for your {settings.PROJECT_NAME} account was successfully reset using the password reset link.\n\n"
+            f"If you did not initiate this password reset, please contact our support team immediately.\n\n"
+            f"Thanks,\nThe {settings.PROJECT_NAME} Team"
+        )
+        send_email_task.delay(to_email=user.email, subject=email_subject, body=email_body)
+        logger.info(f"Password reset confirmation email queued for {user.email}.")
+
         # TODO: Invalidate other active sessions/tokens for this user.
         return {"status": "success", "message": "Password has been reset successfully."}
     except Exception as e:

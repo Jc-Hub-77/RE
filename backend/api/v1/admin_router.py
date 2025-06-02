@@ -114,10 +114,19 @@ async def admin_update_managed_strategy( # Renamed function for clarity
 async def admin_list_all_subscriptions(
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100)
-    # TODO: Add filters like user_id, strategy_id, is_active if needed in admin_service layer
+    per_page: int = Query(20, ge=1, le=100),
+    user_id: Optional[int] = Query(None, description="Filter by User ID"),
+    strategy_id: Optional[int] = Query(None, description="Filter by Strategy ID"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status")
 ):
-    result = admin_service.list_all_subscriptions_admin(db, page=page, per_page=per_page)
+    result = admin_service.list_all_subscriptions_admin(
+        db,
+        page=page,
+        per_page=per_page,
+        user_id=user_id,
+        strategy_id=strategy_id,
+        is_active=is_active
+    )
     if result["status"] == "error":
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message", "Error listing all subscriptions"))
     return result
