@@ -152,6 +152,13 @@ This project includes Dockerfiles and a `docker-compose.yml` configuration to si
     # Example: Running migrations from a temporary container or a dedicated migration job
     # docker run --rm -e DATABASE_URL="<your_production_db_url>" your_registry/trading_platform_web:latest alembic upgrade head
     ```
+    **Note on Migration History:** The Alembic migration history has been corrected. The proper sequence of existing migrations is:
+    1. `9feeb80d8c05_add_order_and_position_tables.py` (Initial schema for orders and positions)
+    2. `6ca05d1600df_add_raw_order_data_to_order_table.py` (Adds raw_order_data to orders)
+    3. `dc7a444085b0_create_user_strategy_subscriptions_table.py` (Adds user_strategy_subscriptions table)
+    4. `66d23d22d253_add_gateway_metadata_json_to_payment_.py` (Adds gateway_metadata_json to payment_transactions)
+    This order is correctly reflected in the `down_revision` pointers within the migration files.
+
 5.  **Deploy Web Server & Workers:** Deploy your containerized application using your chosen orchestration platform (e.g., Kubernetes, Docker Swarm, AWS ECS, Google Cloud Run/GKE, Azure Kubernetes Service). Configure the number of replicas for web and worker services based on expected load.
 6.  **Deploy Frontend:** Serve the static files from the `frontend/` directory using a web server (e.g., Nginx) or a static site hosting service. Configure it to proxy API requests to the backend Web Server.
 7.  **Set Up Monitoring & Logging:** Implement solutions for centralized logging and monitoring of all components.

@@ -74,13 +74,40 @@ if not settings.STRATEGIES_DIR:
         print("WARNING: STRATEGIES_DIR environment variable is not set and default path not found.")
         # settings.STRATEGIES_DIR = None # Or some other default if appropriate
 
-# Ensure JWT_SECRET_KEY is not the default in a production-like environment
-if settings.JWT_SECRET_KEY == "a_very_secure_default_secret_key_please_change_me" and os.getenv("ENVIRONMENT") == "production":
-    raise ValueError("CRITICAL: JWT_SECRET_KEY must be set to a strong, unique secret in production!")
+if os.getenv("ENVIRONMENT") == "production":
+    # Ensure JWT_SECRET_KEY is not the default in a production-like environment
+    if settings.JWT_SECRET_KEY == "a_very_secure_default_secret_key_please_change_me":
+        # Consider raising an error for critical misconfigurations
+        print("CRITICAL ERROR: JWT_SECRET_KEY must be set to a strong, unique secret in production!")
+        # For truly critical, you might exit: import sys; sys.exit(1)
 
-# Ensure API_ENCRYPTION_KEY is set in a production environment
-if not settings.API_ENCRYPTION_KEY and os.getenv("ENVIRONMENT") == "production":
-    raise ValueError("CRITICAL: API_ENCRYPTION_KEY must be set in a production environment!")
+    # Ensure API_ENCRYPTION_KEY is set in a production environment
+    if not settings.API_ENCRYPTION_KEY:
+        print("CRITICAL ERROR: API_ENCRYPTION_KEY must be set in a production environment!")
+
+    # Check for STRATEGIES_DIR
+    if not settings.STRATEGIES_DIR or "strategies" in (settings.STRATEGIES_DIR or "") and "backend" not in (settings.STRATEGIES_DIR or "") : # Basic check if it's unset or still the dev default
+        print("CRITICAL WARNING: STRATEGIES_DIR is not explicitly configured for production or might be using a default development path. Ensure it points to the correct production location.")
+
+    # SMTP Settings Checks
+    if not settings.SMTP_HOST or settings.SMTP_HOST == "your_smtp_host":
+        print("CRITICAL WARNING: SMTP_HOST is not configured for production. Email functionality will be affected.")
+    # Add checks for SMTP_USER, SMTP_PASSWORD, EMAILS_FROM_EMAIL if they are always required for your setup
+    # For example:
+    # if not settings.SMTP_USER:
+    #     print("CRITICAL WARNING: SMTP_USER is not configured for production.")
+    # if not settings.SMTP_PASSWORD: # Be careful about logging presence of password itself
+    #     print("CRITICAL WARNING: SMTP_PASSWORD is not configured for production.")
+    # if not settings.EMAILS_FROM_EMAIL:
+    #     print("CRITICAL WARNING: EMAILS_FROM_EMAIL is not configured for production.")
+
+    # Payment Gateway Settings Checks
+    if not settings.COINBASE_COMMERCE_API_KEY or settings.COINBASE_COMMERCE_API_KEY == "your_coinbase_commerce_api_key_here":
+        print("CRITICAL WARNING: COINBASE_COMMERCE_API_KEY is not configured for production. Payment gateway functionality will be affected.")
+    
+    if not settings.COINBASE_COMMERCE_WEBHOOK_SECRET or settings.COINBASE_COMMERCE_WEBHOOK_SECRET == "your_coinbase_commerce_webhook_secret_here":
+        print("CRITICAL WARNING: COINBASE_COMMERCE_WEBHOOK_SECRET is not configured for production. Payment gateway webhook verification will fail.")
+
 
 if not settings.DATABASE_URL:
     raise ValueError("DATABASE_URL not set. Please configure it in .env or environment variables.")

@@ -13,9 +13,49 @@ import importlib.util # Added for strategy validation
 from backend.models import User, Strategy, UserStrategySubscription, PaymentTransaction, ApiKey, SystemSetting # Added SystemSetting
 from backend.services import live_trading_service # Added live_trading_service
 from backend.config import settings
+from fastapi import HTTPException # Added HTTPException
 
 # Initialize logger
 logger = logging.getLogger(__name__)
+
+# --- Helper for Payment Options Validation ---
+def _validate_payment_options_json(payment_options_json_str: Optional[str]) -> Optional[list]:
+    """
+    Validates the structure and types of payment_options_json.
+    Raises HTTPException if validation fails.
+    Returns the parsed list if valid, or None if input is None or empty.
+    """
+    if not payment_options_json_str: # Handles None or empty string
+        return None
+
+    try:
+        parsed_options = json.loads(payment_options_json_str)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format for payment options.")
+
+    if not isinstance(parsed_options, list):
+        raise HTTPException(status_code=400, detail="Payment options must be a list.")
+
+    if not parsed_options: # Empty list is acceptable
+        return []
+
+    for option in parsed_options:
+        if not isinstance(option, dict):
+            raise HTTPException(status_code=400, detail="Each payment option must be a dictionary.")
+        
+        if 'months' not in option or 'price_usd' not in option:
+            raise HTTPException(status_code=400, detail="Each payment option must have 'months' and 'price_usd' keys.")
+        
+        if not isinstance(option['months'], int):
+            raise HTTPException(status_code=400, detail=f"Payment option 'months' (value: {option['months']}) must be an integer.")
+        
+        if not isinstance(option['price_usd'], (int, float)):
+            raise HTTPException(status_code=400, detail=f"Payment option 'price_usd' (value: {option['price_usd']}) must be a number (integer or float).")
+        
+        # 'description' is optional, no specific validation needed here unless constraints apply (e.g., max length)
+        
+    return parsed_options
+
 
 # --- Admin User Management ---
 def list_all_users(db_session: Session, page: int = 1, per_page: int = 20, search_term: str = None, sort_by: str = "id", sort_order: str = "asc"):
@@ -207,12 +247,17 @@ def add_new_strategy_admin(db_session: Session, name: str, description: str, pyt
         logger.warning(f"Admin: Attempted to add strategy with invalid JSON parameters: {default_parameters}")
         return {"status": "error", "message": "Default parameters must be valid JSON."}
 
-    if payment_options_json:
-        try:
-            json.loads(payment_options_json)
-        except json.JSONDecodeError:
-            logger.warning(f"Admin: Attempted to add strategy with invalid JSON for payment options: {payment_options_json}")
-            return {"status": "error", "message": "Invalid JSON format for payment options."}
+    # Validate payment_options_json using the helper
+    # The helper will raise HTTPException if validation fails, which will be caught by FastAPI framework.
+    # If it returns successfully, we don't need to store its return value here explicitly,
+    # as the original payment_options_json string is stored in the model.
+    # However, if we wanted to store the cleaned/parsed version, we could assign it.
+    # For now, just validate. The actual string is passed to the model.
+    try:
+        _validate_payment_options_json(payment_options_json)
+    except HTTPException as e:
+        logger.warning(f"Admin: Validation failed for payment_options_json during strategy creation. Detail: {e.detail}")
+        return {"status": "error", "message": e.detail} # Return error structure consistent with others
 
     new_strategy = Strategy(
         name=name, 
@@ -290,21 +335,16 @@ def update_strategy_admin(db_session: Session, strategy_id: int, updates: dict):
                     logger.error(f"Admin: Error validating updated strategy file {value}: {e}", exc_info=True)
                     return {"status": "error", "message": f"Error validating updated strategy file: {str(e)}"}
 
-            if key == "payment_options_json" and value is not None:
-                if value: # Ensure it's not an empty string if that's not allowed, or handle as needed
-                    try:
-                        json.loads(value)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Admin: Attempted to update strategy {strategy_id} with invalid JSON for payment options: {value}")
-                        return {"status": "error", "message": "Invalid JSON format for payment options."}
-                # If value is None or empty string and that's acceptable for clearing the field,
-                # it will be set by setattr. If empty string "" should be invalid JSON,
-                # the json.loads(value) will raise an error.
-                # If you want to allow null but not empty string for actual JSON, add specific check:
-                # elif key == "payment_options_json" and value == "":
-                #    return {"status": "error", "message": "Payment options JSON cannot be an empty string. Send null to clear."}
-
-
+            if key == "payment_options_json": # value can be None, empty string, or JSON string
+                try:
+                    # _validate_payment_options_json handles None, empty string, and validation.
+                    # It will raise HTTPException if validation fails.
+                    _validate_payment_options_json(value) 
+                except HTTPException as e:
+                    logger.warning(f"Admin: Validation failed for payment_options_json during strategy update for ID {strategy_id}. Detail: {e.detail}")
+                    return {"status": "error", "message": e.detail} # Return error structure
+                # If validation passes, setattr will handle it (value could be None, empty str, or valid JSON str)
+            
             setattr(strategy, key, value)
             updated_count +=1
     

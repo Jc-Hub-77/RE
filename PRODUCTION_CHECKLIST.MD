@@ -70,7 +70,7 @@ This document provides a checklist of crucial considerations and recommendations
 - [ ] **Performance Tuning:** Monitor and tune database performance (query optimization, indexing).
 - [ ] **Regular Backups:** Implement and regularly test a reliable database backup and recovery strategy.
 - [ ] **Connection Pooling:** Ensure database connection pooling is appropriately configured for the expected load (FastAPI/SQLAlchemy usually handles this, but settings might need tuning).
-- [ ] **Enhance Payment Charge Metadata Storage:** Consider enhancing the `PaymentTransaction` model by adding a dedicated field, such as `charge_metadata_json: Text` (or `gateway_metadata: JSONB` if using PostgreSQL and SQLAlchemy supports it well). Storing the raw metadata JSON received from the payment gateway (or generated internally before sending to the gateway) in this structured field would be more robust for debugging, manual recovery, and future analysis than relying on parsing it from the `description` field. This aligns with the `IDEAL` comment noted in `backend/services/payment_service.py`.
+- [ ] **Store Raw Payment Gateway Metadata:** The `PaymentTransaction` model now includes a `gateway_metadata_json: Text` field. This field stores the raw JSON metadata received from the payment gateway (e.g., during charge creation or via webhooks). This is crucial for robust debugging, manual recovery processes, and detailed payment analysis, reducing reliance on parsing such data from the `description` field.
 
 ## VI. Scalability & Reliability
 - [ ] **Load Testing:** Conduct load testing to understand performance bottlenecks and determine appropriate scaling for Gunicorn workers, Celery workers, and database resources.

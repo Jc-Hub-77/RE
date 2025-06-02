@@ -237,6 +237,7 @@ class PaymentTransaction(Base):
     internal_reference = Column(String, unique=True, index=True, nullable=True) # For manual or internal tracking
     status = Column(String, default="pending", index=True) # pending, completed, failed, refunded
     description = Column(Text, nullable=True) # e.g., "Subscription to EMA Crossover strategy for 1 month"
+    gateway_metadata_json = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
