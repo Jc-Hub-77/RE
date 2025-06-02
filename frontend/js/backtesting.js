@@ -1,6 +1,11 @@
 // frontend/js/backtesting.js
 console.log("backtesting.js loaded");
 
+// Helper function to get CSS variable values
+function getCssVariable(varName) {
+    return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
 // const BACKEND_API_BASE_URL = 'http://127.0.0.1:8000'; // Ensure this is correct - This will now be set globally via HTML script tag
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -28,6 +33,46 @@ document.addEventListener('DOMContentLoaded', () => {
     let equityChart = null;
     let candlestickSeries = null;
     let equitySeries = null;
+
+    // Function to define common chart options
+    const commonChartOptions = (isDarkMode) => ({
+        width: priceChartContainer.clientWidth, // This will be specific to each chart container
+        height: 400,
+        layout: {
+            textColor: isDarkMode ? getCssVariable('--dm-text-color') : getCssVariable('--text-color'),
+            background: {
+                type: 'solid',
+                color: isDarkMode ? getCssVariable('--dm-surface-color') : getCssVariable('--card-background')
+            },
+            fontSize: 12,
+        },
+        grid: {
+            vertLines: {
+                color: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+            },
+            horzLines: {
+                color: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+            }
+        },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: {
+                color: isDarkMode ? getCssVariable('--dm-text-color-muted') : getCssVariable('--dark-gray'),
+                style: LightweightCharts.LineStyle.Dashed,
+            },
+            horzLine: {
+                color: isDarkMode ? getCssVariable('--dm-text-color-muted') : getCssVariable('--dark-gray'),
+                style: LightweightCharts.LineStyle.Dashed,
+            }
+        },
+        timeScale: {
+            borderColor: isDarkMode ? getCssVariable('--dm-border-color') : getCssVariable('--border-color'),
+        },
+        rightPriceScale: {
+            borderColor: isDarkMode ? getCssVariable('--dm-border-color') : getCssVariable('--border-color'),
+        }
+    });
+
 
     async function initializeBacktestPage() {
         await populateStrategySelect();
@@ -58,7 +103,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!strategySelect) return;
         strategySelect.innerHTML = '<option value="">Loading strategies...</option>';
         try {
-            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/strategies/`, { // Corrected: Public strategies list
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/strategies/`, {
                 headers: { 'Authorization': `Bearer ${authToken}` }
             });
             if (!response.ok) { if (response.status === 401) { window.location.href = 'login.html'; return; } throw new Error(`HTTP error! status: ${response.status}`);}
@@ -70,7 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 strategySelect.innerHTML = '<option value="">Select Strategy</option>';
                 strategies.forEach(strategy => {
                     const option = document.createElement('option');
-                    option.value = strategy.id; // Assuming DB ID
+                    option.value = strategy.id;
                     option.textContent = strategy.name;
                     strategySelect.appendChild(option);
                 });
@@ -90,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         paramsContainer.innerHTML = '<p><em>Loading parameters...</em></p>';
         try {
-            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/strategies/${strategyId}`, { // Corrected: Public strategy detail
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/strategies/${strategyId}`, {
                 headers: { 'Authorization': `Bearer ${authToken}` }
             });
             if (!response.ok) { if (response.status === 401) { window.location.href = 'login.html'; return; } throw new Error(`HTTP error! status: ${response.status}`);}
@@ -99,10 +144,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.status === "success" && data.details && data.details.parameters_definition) {
                 paramsContainer.innerHTML = '<h3>Strategy Parameters:</h3>';
                 const paramsGrid = document.createElement('div');
-                paramsGrid.className = 'form-grid'; // Assuming this class helps with layout
+                paramsGrid.className = 'form-grid';
                 for (const paramName in data.details.parameters_definition) {
                     const paramDef = data.details.parameters_definition[paramName];
-                    const paramGroup = document.createElement('div'); // Changed from group to paramGroup
+                    const paramGroup = document.createElement('div');
                     paramGroup.className = 'form-group';
                     const label = document.createElement('label');
                     label.setAttribute('for', `param_${paramName}`);
@@ -139,13 +184,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     input.required = paramDef.required || false;
                     
                     paramGroup.appendChild(label); 
-                    if (paramDef.type === "bool") { // For checkboxes, label often comes after
+                    if (paramDef.type === "bool") {
                         const wrapper = document.createElement('div');
                         wrapper.style.display = 'flex';
                         wrapper.style.alignItems = 'center';
                         input.style.marginRight = '10px';
                         wrapper.appendChild(input);
-                        wrapper.appendChild(label); // Label text might need to be just the param name for checkbox
+                        wrapper.appendChild(label);
                         paramGroup.appendChild(wrapper);
                     } else {
                         paramGroup.appendChild(input);
@@ -165,13 +210,12 @@ document.addEventListener('DOMContentLoaded', () => {
             event.preventDefault();
             resultsSection.style.display = 'block';
             resultsContent.style.display = 'none';
-            metricsSummaryContainer.innerHTML = ''; // Clear previous metrics
+            metricsSummaryContainer.innerHTML = '';
             if(priceChart) priceChart.remove(); priceChart = null;
             if(equityChart) equityChart.remove(); equityChart = null;
             if(tradesLogTableBody) tradesLogTableBody.innerHTML = '';
             resultsLoading.style.display = 'block';
             resultsLoading.textContent = 'Submitting backtest job...';
-
 
             const formData = new FormData(backtestSetupForm);
             const customParameters = {};
@@ -190,34 +234,33 @@ document.addEventListener('DOMContentLoaded', () => {
                         else if (paramDef.type === "bool") customParameters[paramName] = document.getElementById(`param_${paramName}`).checked;
                         else customParameters[paramName] = value;
                     } else {
-                         customParameters[paramName] = value; // Fallback if def not found
+                         customParameters[paramName] = value;
                     }
                 }
             }
             
             const payload = {
-                backtest_params: { // This structure matches the backend Pydantic model nesting
+                backtest_params: {
                     strategy_db_id: strategyId,
                     custom_parameters: customParameters 
-                    // api_key_id is not needed for backtest data source selection
                 },
                 exchange_id: formData.get('exchangeId'),
                 symbol: formData.get('symbol'),
                 timeframe: formData.get('timeframe'),
-                start_date: new Date(formData.get('startDate')).toISOString(), // Ensure ISO format
-                end_date: new Date(formData.get('endDate')).toISOString(),   // Ensure ISO format
+                start_date: new Date(formData.get('startDate')).toISOString(),
+                end_date: new Date(formData.get('endDate')).toISOString(),
                 initial_capital: parseFloat(formData.get('initialCapital'))
             };
 
             console.log("Running backtest with payload:", JSON.stringify(payload, null, 2));
             try {
-                const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/backtests`, { // Corrected Endpoint
+                const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/backtests`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
                     body: JSON.stringify(payload)
                 });
                 
-                const result = await response.json(); // Initial response from queuing the task
+                const result = await response.json();
 
                 if (!response.ok || result.status === "error") {
                     const errData = result;
@@ -239,8 +282,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function pollForBacktestResults(backtestId) {
-        const pollInterval = 5000; // 5 seconds
-        const maxAttempts = 360; // 30 minutes (5s * 360 = 1800s)
+        const pollInterval = 5000;
+        const maxAttempts = 360;
         let attempts = 0;
 
         const intervalId = setInterval(async () => {
@@ -257,19 +300,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     headers: { 'Authorization': `Bearer ${authToken}` }
                 });
                 if (!response.ok) {
-                    // Specific handling for 404 if the backtest ID is somehow lost or invalid early on
                     if (response.status === 404) {
                         clearInterval(intervalId);
                         resultsLoading.style.display = 'none';
                         metricsSummaryContainer.innerHTML = `<p class="error-message">Backtest ID ${backtestId} not found. Please try again.</p>`;
                         return;
                     }
-                    // For other errors, just log and continue polling for a while
                     console.warn(`Polling error for backtest ID ${backtestId}: HTTP ${response.status}`);
-                    return; // Don't throw, continue polling unless it's a fatal error like 404
+                    return;
                 }
                 
-                const results = await response.json(); // Expects strategy_schemas.BacktestResultResponse
+                const results = await response.json();
 
                 if (results.status === "completed" || results.status === "failed" || results.status === "no_data") {
                     clearInterval(intervalId);
@@ -282,21 +323,20 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 } else if (results.status === "running" || results.status === "queued") {
                     resultsLoading.textContent = `Backtest is ${results.status}. Polling... (Attempt ${attempts}/${maxAttempts})`;
-                } else { // Unknown status
+                } else {
                     clearInterval(intervalId);
                     resultsLoading.style.display = 'none';
                     metricsSummaryContainer.innerHTML = `<p class="error-message">Unknown backtest status: ${results.status}. Message: ${results.status_message}</p>`;
                 }
             } catch (error) {
                 console.error(`Error polling for backtest ID ${backtestId}:`, error);
-                // Don't clear interval on network errors, allow retries
             }
         }, pollInterval);
     }
 
     function displayBacktestResults(results) {
-        // Ensure results.details contains all expected fields
-        const details = results.details || {}; // Fallback if details is not nested as expected by schema
+        const details = results.details || {};
+        const isDarkMode = document.body.classList.contains('dark-mode');
         
         metricsSummaryContainer.innerHTML = `
             <div class="metric-item"><strong>Strategy:</strong> ${details.strategy_name_used || results.strategy_name_used || 'N/A'}</div>
@@ -310,25 +350,24 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="metric-item"><strong>Total Trades:</strong> ${details.total_trades !== undefined ? details.total_trades : (results.total_trades !== undefined ? results.total_trades : 0)}</div>
             <div class="metric-item"><strong>Win Rate:</strong> ${(details.win_rate !== undefined ? details.win_rate : (results.win_rate !== undefined ? results.win_rate : 0)).toFixed(2)}%</div>`;
 
-        // Prepare chart data
         const ohlcvDataForChart = details.ohlcv_data ? details.ohlcv_data.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })) : [];
         const equityCurveForChart = details.equity_curve ? details.equity_curve.map(d => ({ time: d.time, value: d.value })) : [];
+
         const tradesLogForChart = details.trades_log ? details.trades_log.map(t => ({
-            time: t.entry_time, // Assuming entry_time is preferred for marker
+            time: t.entry_time,
             position: t.type === 'long' ? 'belowBar' : 'aboveBar',
-            color: t.type === 'long' ? 'green' : 'red',
+            color: t.type === 'long' ? getCssVariable('--success-color') : getCssVariable('--danger-color'),
             shape: t.type === 'long' ? 'arrowUp' : 'arrowDown',
             text: `${t.type.toUpperCase()} @ ${t.entry_price.toFixed(2)}` + (t.exit_time ? ` -> ${t.exit_price.toFixed(2)} (P: ${t.pnl.toFixed(2)})` : '')
         })) : [];
         
-        // Add exit markers
         if(details.trades_log) {
             details.trades_log.forEach(trade => {
                 if (trade.exit_time) {
                     tradesLogForChart.push({
                         time: trade.exit_time,
-                        position: trade.type === 'long' ? 'aboveBar' : 'belowBar', // Exit markers opposite to entry
-                        color: 'blue', 
+                        position: trade.type === 'long' ? 'aboveBar' : 'belowBar',
+                        color: getCssVariable('--dark-gray'),
                         shape: trade.type === 'long' ? 'arrowDown' : 'arrowUp',
                         text: `Exit ${trade.type.toUpperCase()} @ ${trade.exit_price.toFixed(2)} (P: ${trade.pnl.toFixed(2)})`
                     });
@@ -336,18 +375,28 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
-
         if (priceChart) priceChart.remove();
-        priceChart = LightweightCharts.createChart(priceChartContainer, { width: priceChartContainer.clientWidth, height: 400, layout: { textColor: getChartTextColor(), background: { type: 'solid', color: getChartBackgroundColor() } } });
-        candlestickSeries = priceChart.addCandlestickSeries();
+        const priceChartSpecificOptions = { ...commonChartOptions(isDarkMode), width: priceChartContainer.clientWidth };
+        priceChart = LightweightCharts.createChart(priceChartContainer, priceChartSpecificOptions);
+        candlestickSeries = priceChart.addCandlestickSeries({
+            upColor: getCssVariable('--success-color'),
+            downColor: getCssVariable('--danger-color'),
+            borderVisible: false,
+            wickUpColor: getCssVariable('--success-color'),
+            wickDownColor: getCssVariable('--danger-color'),
+        });
         if (ohlcvDataForChart.length > 0) candlestickSeries.setData(ohlcvDataForChart);
         else console.warn("OHLCV data not provided or empty for price chart.");
         if(candlestickSeries && tradesLogForChart.length > 0) candlestickSeries.setMarkers(tradesLogForChart);
         priceChart.timeScale().fitContent();
 
         if (equityChart) equityChart.remove();
-        equityChart = LightweightCharts.createChart(equityChartContainer, { width: equityChartContainer.clientWidth, height: 400, layout: { textColor: getChartTextColor(), background: { type: 'solid', color: getChartBackgroundColor() } } });
-        equitySeries = equityChart.addLineSeries({ color: document.body.classList.contains('dark-mode') ? '#42a5f5' : '#007bff' });
+        const equityChartSpecificOptions = { ...commonChartOptions(isDarkMode), width: equityChartContainer.clientWidth };
+        equityChart = LightweightCharts.createChart(equityChartContainer, equityChartSpecificOptions);
+        equitySeries = equityChart.addLineSeries({
+            color: isDarkMode ? getCssVariable('--dm-primary-color') : getCssVariable('--primary-color'),
+            lineWidth: 2
+        });
         if (equityCurveForChart.length > 0) equitySeries.setData(equityCurveForChart);
         equityChart.timeScale().fitContent();
 
@@ -361,22 +410,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.insertCell().textContent = trade.exit_time ? new Date(trade.exit_time * 1000).toLocaleString() : 'N/A';
                 row.insertCell().textContent = trade.exit_price ? trade.exit_price.toFixed(2) : 'N/A';
                 row.insertCell().textContent = trade.size || 'N/A';
-                row.insertCell().textContent = trade.pnl !== undefined ? trade.pnl.toFixed(2) : 'N/A';
+                row.insertCell().textContent = trade.take_profit ? trade.take_profit.toFixed(2) : 'N/A';
+                row.insertCell().textContent = trade.stop_loss ? trade.stop_loss.toFixed(2) : 'N/A';
+
+                const pnlCell = row.insertCell();
+                const pnlValue = trade.pnl !== undefined ? parseFloat(trade.pnl) : NaN;
+                pnlCell.textContent = !isNaN(pnlValue) ? pnlValue.toFixed(2) : 'N/A';
+                if (!isNaN(pnlValue)) {
+                    pnlCell.className = pnlValue >= 0 ? 'pnl-positive' : 'pnl-negative';
+                }
                 row.insertCell().textContent = trade.reason || 'N/A';
             });
         }
     }
     
-    function getChartTextColor() { return document.body.classList.contains('dark-mode') ? 'var(--dm-text-color)' : 'var(--text-color)'; }
-    function getChartBackgroundColor() { return document.body.classList.contains('dark-mode') ? 'var(--dm-surface-color)' : 'var(--background-color)'; }
-
     const themeToggle = document.getElementById('themeSwitch');
     if (themeToggle) {
         themeToggle.addEventListener('change', function() {
-            const chartOptions = { layout: { textColor: getChartTextColor(), background: { type: 'solid', color: getChartBackgroundColor() } } };
-            if (priceChart) priceChart.applyOptions(chartOptions);
-            if (equityChart) equityChart.applyOptions(chartOptions);
-            if (equitySeries) equitySeries.applyOptions({ color: document.body.classList.contains('dark-mode') ? '#42a5f5' : '#007bff' });
+            const isDarkMode = document.body.classList.contains('dark-mode');
+            const newPriceChartOptions = { ...commonChartOptions(isDarkMode), width: priceChartContainer.clientWidth };
+            const newEquityChartOptions = { ...commonChartOptions(isDarkMode), width: equityChartContainer.clientWidth };
+
+            if (priceChart) priceChart.applyOptions(newPriceChartOptions);
+            if (candlestickSeries) candlestickSeries.applyOptions({
+                upColor: getCssVariable('--success-color'),
+                downColor: getCssVariable('--danger-color'),
+                wickUpColor: getCssVariable('--success-color'),
+                wickDownColor: getCssVariable('--danger-color'),
+            });
+            if (equityChart) equityChart.applyOptions(newEquityChartOptions);
+            if (equitySeries) equitySeries.applyOptions({
+                color: isDarkMode ? getCssVariable('--dm-primary-color') : getCssVariable('--primary-color')
+            });
         });
     }
 

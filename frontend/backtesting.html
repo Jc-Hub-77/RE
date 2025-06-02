@@ -15,13 +15,13 @@
 
         #priceChartContainer, #equityChartContainer {
             width: 100%;
-            height: 400px; 
+            height: 400px;
             margin-bottom: 20px;
             border: 1px solid var(--border-color); /* Use CSS var */
         }
         /* .metrics-summary and .metric-item are globally styled */
         #runBacktestBtn { margin-top: 15px; } /* .btn styling applies */
-        
+
         /* Table styling is now global */
         /* #tradesLogTable th, #tradesLogTable td { ... } */
     </style>
@@ -40,8 +40,8 @@
                     <li><a href="strategies.html">Bot Presets / Strategies</a></li>
                     <li><a href="backtesting.html" class="active">Backtesting</a></li>
                     <li><h4>Account</h4></li>
-                    <li><a href="dashboard.html#profile">Profile Settings</a></li> 
-                    <li><a href="dashboard.html#subscriptions">My Subscriptions</a></li> 
+                    <li><a href="dashboard.html#profile">Profile Settings</a></li>
+                    <li><a href="dashboard.html#subscriptions">My Subscriptions</a></li>
                     <li><a href="#" id="logoutButtonSidebar">Logout</a></li>
                 </ul>
                 <div class="theme-switch-wrapper">
@@ -108,7 +108,7 @@
                                 <input type="number" id="backtestInitialCapital" name="initialCapital" value="10000" step="100" required>
                             </div>
                         </div>
-                        
+
                         <div id="backtestStrategyParamsContainer" class="mt-2">
                              <p><em>Select a strategy to see its parameters.</em></p>
                             <!-- Strategy-specific parameters will be loaded here inside a .form-grid -->
@@ -131,10 +131,25 @@
                         <h3 class="mt-2">Equity Curve</h3>
                         <div id="equityChartContainer"></div>
                         <h3 class="mt-2">Trades Log</h3>
-                        <table id="tradesLogTable">
-                            <thead><tr><th>Type</th><th>Entry Time</th><th>Entry Price</th><th>Exit Time</th><th>Exit Price</th><th>Size</th><th>PnL</th></tr></thead>
+                        <div style="overflow-x: auto;"> <!-- Add this wrapper -->
+                            <table id="tradesLogTable">
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                    <th>Entry Time</th>
+                                    <th>Entry Price</th>
+                                    <th>Exit Time</th>
+                                    <th>Exit Price</th>
+                                    <th>Size</th>
+                                    <th>TP</th>
+                                    <th>SL</th>
+                                    <th>PnL</th>
+                                    <th>Reason</th>
+                                </tr>
+                            </thead>
                             <tbody id="tradesLogTableBody"></tbody>
                         </table>
+                    </div> <!-- Close wrapper -->
                     </div>
                 </div>
             </section>
