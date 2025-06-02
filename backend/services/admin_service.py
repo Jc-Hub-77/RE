@@ -10,7 +10,8 @@ import sqlalchemy.types
 import json
 import importlib.util # Added for strategy validation
 
-from backend.models import User, Strategy, UserStrategySubscription, PaymentTransaction, ApiKey 
+from backend.models import User, Strategy, UserStrategySubscription, PaymentTransaction, ApiKey
+from backend.services import live_trading_service # Added live_trading_service
 from backend.config import settings
 
 # Initialize logger
@@ -459,3 +460,29 @@ def update_site_setting_admin(setting_key: str, setting_value: str):
 
     logger.info(f"Admin: Simulated attempt to update site setting '{setting_key}' to '{setting_value}'. This is not implemented for direct .env modification.")
     return {"status": "info_simulated", "message": f"Updating setting '{setting_key}' is conceptual. Direct modification of environment variables at runtime is not supported through this function."}
+
+
+# --- Admin Subscription Restart ---
+def restart_strategy_subscription(db_session: Session, subscription_id: int, admin_user_id: int):
+    """
+    Admin function to restart a strategy subscription.
+    This function now delegates the core logic to live_trading_service.restart_strategy_admin.
+    """
+    logger.info(f"Admin User ID: {admin_user_id} initiated restart for subscription ID: {subscription_id} via admin_service, delegating to live_trading_service.")
+
+    # Call the centralized restart function in live_trading_service
+    # This function is assumed to handle all logic including fetching subscription, error handling, stopping, and starting.
+    # It should also handle logging for its own steps.
+    # We pass admin_user_id for logging/auditing within restart_strategy_admin.
+    restart_result = live_trading_service.restart_strategy_admin(
+        db_session=db_session, 
+        subscription_id=subscription_id, 
+        admin_id=admin_user_id
+    )
+
+    if restart_result["status"] == "success":
+        logger.info(f"Admin service call to restart subscription ID {subscription_id} completed successfully. Result: {restart_result.get('message')}")
+    else:
+        logger.error(f"Admin service call to restart subscription ID {subscription_id} failed. Reason: {restart_result.get('message')}")
+
+    return restart_result
