@@ -51,6 +51,27 @@ class AdminReferralActionResponse(BaseModel): # General response for admin actio
     status: str
     message: str
 
+class ReferralPayoutLogItem(BaseModel):
+    log_id: int
+    referral_id: int
+    admin_user_id: Optional[int] = None
+    admin_username: Optional[str] = None
+    amount_paid: float
+    payout_initiated_at: datetime.datetime
+    notes: Optional[str] = None
+
+    class Config:
+        model_config = { "from_attributes": True }
+
+class AdminReferralPayoutHistoryResponse(BaseModel):
+    status: str = "success" # Default status for successful responses
+    items: List[ReferralPayoutLogItem]
+    total_items: int
+    page: int
+    per_page: int
+    total_pages: int
+    message: Optional[str] = None # For potential errors or info messages
+
 # Schema for the process_payment_for_referral_commission (internal or webhook triggered)
 # This might not be directly exposed via an API route in the referral router itself,
 # but could be a sub-process called by a payment webhook handler.

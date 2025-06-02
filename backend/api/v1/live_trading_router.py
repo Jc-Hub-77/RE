@@ -5,7 +5,7 @@ from typing import List, Optional # Added List, Optional
 
 from backend.schemas import live_trading_schemas # Ensure this schema is defined and has StrategyActionResponse
 from backend.services import live_trading_service
-from backend.models import User
+from backend.models import User, UserStrategySubscription # Added UserStrategySubscription
 from backend.db import get_db
 from backend.api.v1.auth_router import get_current_active_user # Dependency for protected routes
 from backend.dependencies import get_current_active_admin_user # Corrected import for admin dependency
@@ -22,9 +22,33 @@ async def deploy_live_strategy(
     """
     Deploys a live trading strategy for a given user subscription.
     """
-    # TODO: Ensure that current_user.id matches user_id on the subscription, or that user is admin
-    result = live_trading_service.deploy_strategy(db, user_strategy_subscription_id)
+    # Fetch the subscription object
+    subscription = db.query(UserStrategySubscription).filter(UserStrategySubscription.id == user_strategy_subscription_id).first()
+
+    if not subscription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subscription not found."
+        )
+
+    # Authorization check: User must be admin or own the subscription
+    if not current_user.is_admin and current_user.id != subscription.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to deploy this strategy subscription."
+        )
+    
+    # Original logic for deploying the strategy
+    # The service function might also need the user_id, so we pass current_user.id
+    # Ensure live_trading_service.deploy_strategy is adapted if it needs user_id for non-admin cases
+    result = live_trading_service.deploy_strategy(
+        db_session=db, # Pass db_session as per typical service function signature
+        subscription_id=user_strategy_subscription_id,
+        user_id=current_user.id # Pass user_id to the service for context
+    )
+    
     if result["status"] == "error":
+        # Consider if specific error messages from deploy_strategy should map to different HTTP status codes
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
     return result
 
@@ -37,8 +61,29 @@ async def stop_live_strategy(
     """
     Stops a running live trading strategy for a given user subscription.
     """
-    # TODO: Ensure that current_user.id matches user_id on the subscription, or that user is admin
-    result = live_trading_service.stop_strategy(db, user_strategy_subscription_id) # Passed db directly
+    # Fetch the subscription object
+    subscription = db.query(UserStrategySubscription).filter(UserStrategySubscription.id == user_strategy_subscription_id).first()
+
+    if not subscription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subscription not found."
+        )
+
+    # Authorization check: User must be admin or own the subscription
+    if not current_user.is_admin and current_user.id != subscription.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to stop this strategy subscription."
+        )
+        
+    # Original logic for stopping the strategy
+    # Pass user_id for context, especially if stop_strategy needs to know who initiated for non-admin
+    result = live_trading_service.stop_strategy(
+        db_session=db, # Pass db_session
+        subscription_id=user_strategy_subscription_id,
+        user_id=current_user.id # Pass user_id
+    )
     if result["status"] == "error":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
     return result

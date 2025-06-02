@@ -5,8 +5,10 @@ from typing import Optional
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy import func, desc, or_
 
-from backend.models import User, Referral, PaymentTransaction 
+from backend.models import User, Referral, PaymentTransaction, ReferralPayoutLog # Added ReferralPayoutLog
 from backend.config import settings
+from backend.tasks import send_email_task # Added for email notifications
+from backend.utils import get_system_setting # Added for dynamic commission rate
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -64,12 +66,32 @@ def process_payment_for_referral_commission(db_session: Session, referred_user_i
 
     if referral_record.first_payment_at is not None:
         logger.info(f"Referral ID {referral_record.id}: Commission already processed for first payment.")
-        # TODO: Implement logic for recurring commissions if that's a feature based on settings.
+        # TODO: Implement recurring commission logic if this feature is enabled (e.g., via a system setting). Currently, commission is processed only for the first payment.
         return {"status": "info", "message": "First payment commission already processed for this referral."}
 
     referral_record.first_payment_at = datetime.datetime.utcnow()
     
-    commission_amount = payment_amount_usd * settings.REFERRAL_COMMISSION_RATE
+    # Get referral commission rate from system settings, with a fallback to config
+    commission_rate_str = get_system_setting(
+        db_session, 
+        "referral_commission_rate", 
+        default_value=str(settings.REFERRAL_COMMISSION_RATE)
+    )
+    try:
+        commission_rate = float(commission_rate_str)
+        if not (0 < commission_rate < 1): # Validate the rate is sensible (e.g., 0.01 to 0.99)
+            logger.error(f"Invalid referral commission rate '{commission_rate_str}' from settings. Defaulting to {settings.REFERRAL_COMMISSION_RATE}. Please configure it correctly (0.0 to 1.0).")
+            commission_rate = settings.REFERRAL_COMMISSION_RATE
+        elif commission_rate_str == str(settings.REFERRAL_COMMISSION_RATE):
+             logger.info(f"Using default referral commission rate from configuration: {commission_rate}")
+        else:
+            logger.info(f"Using dynamic referral commission rate from database: {commission_rate}")
+
+    except (ValueError, TypeError):
+        logger.error(f"Could not parse referral commission rate '{commission_rate_str}' from settings. Defaulting to {settings.REFERRAL_COMMISSION_RATE}. Please configure it correctly.")
+        commission_rate = settings.REFERRAL_COMMISSION_RATE
+
+    commission_amount = payment_amount_usd * commission_rate
     
     referral_record.commission_earned_total = (referral_record.commission_earned_total or 0.0) + commission_amount
     referral_record.commission_pending_payout = (referral_record.commission_pending_payout or 0.0) + commission_amount
@@ -77,7 +99,37 @@ def process_payment_for_referral_commission(db_session: Session, referred_user_i
     try:
         db_session.commit()
         logger.info(f"Referral ID {referral_record.id}: Commission of ${commission_amount:.2f} processed for referrer {referral_record.referrer_user_id}.")
-        # TODO: Notify referrer about earned commission (e.g., via email or in-app notification)
+        
+        # Notify referrer about earned commission
+        try:
+            referrer = db_session.query(User).filter(User.id == referral_record.referrer_user_id).first()
+            if referrer and referrer.email:
+                email_subject = "You've Earned a Referral Commission!"
+                email_body = f"""Hi {referrer.username},
+
+Good news! You've earned a commission of ${commission_amount:.2f} from a payment made by one of your referred users.
+
+This amount has been added to your pending payout balance.
+
+Thanks for being a part of the {settings.PROJECT_NAME} community!
+
+The {settings.PROJECT_NAME} Team"""
+                
+                send_email_task.delay(
+                    to_email=referrer.email,
+                    subject=email_subject,
+                    body=email_body
+                )
+                logger.info(f"Referral commission notification email queued for referrer ID {referrer.id} (Email: {referrer.email}).")
+            elif referrer:
+                logger.warning(f"Referrer ID {referrer.id} found, but no email on record. Cannot send commission notification.")
+            else:
+                logger.warning(f"Referrer user not found for ID {referral_record.referrer_user_id}. Cannot send commission notification.")
+        except Exception as email_exc:
+            # Log the email sending error but do not let it roll back the main transaction
+            # The commission is already processed and committed.
+            logger.error(f"Failed to send referral commission notification email for referrer ID {referral_record.referrer_user_id}: {email_exc}", exc_info=True)
+
         return {"status": "success", "message": "Referral commission processed."}
     except Exception as e:
         db_session.rollback()
@@ -158,7 +210,7 @@ def list_referrals_for_admin(db_session: Session, page: int = 1, per_page: int =
         "total_pages": (total_referrals + per_page - 1) // per_page if per_page > 0 else 0
     }
 
-def mark_referral_commission_paid_admin(db_session: Session, referral_id: int, amount_paid: float, notes: Optional[str] = None):
+def mark_referral_commission_paid_admin(db_session: Session, referral_id: int, amount_paid: float, notes: Optional[str] = None, performing_admin_id: Optional[int] = None):
     """Admin action to mark commission as paid for a specific referral record."""
     referral = db_session.query(Referral).filter(Referral.id == referral_id).first()
     if not referral:
@@ -177,17 +229,87 @@ def mark_referral_commission_paid_admin(db_session: Session, referral_id: int, a
     referral.commission_paid_out_total = (referral.commission_paid_out_total or 0.0) + amount_paid
     referral.last_payout_date = datetime.datetime.utcnow()
     
-    # TODO: Log this payout action in an admin audit log or separate payout transaction table.
-    # Include notes if provided. E.g., create a PayoutLog entry.
-    logger.info(f"Admin: Payout of ${amount_paid:.2f} for referral ID {referral_id}. Notes: {notes if notes else 'N/A'}")
+    
+    # Create a log entry for this payout action
+    payout_log_entry = ReferralPayoutLog(
+        referral_id=referral.id,
+        admin_user_id=performing_admin_id,
+        amount_paid=amount_paid,
+        notes=notes,
+        payout_initiated_at=datetime.datetime.utcnow() # Explicitly set, though model has default
+    )
+    db_session.add(payout_log_entry)
+    
+    logger.info(f"Admin ID {performing_admin_id}: Payout of ${amount_paid:.2f} for referral ID {referral_id} logged. Notes: {notes if notes else 'N/A'}")
     
     try:
         db_session.commit()
-        return {"status": "success", "message": "Commission payout recorded successfully."}
+        return {"status": "success", "message": "Commission payout recorded successfully in DB."}
     except Exception as e:
         db_session.rollback()
         logger.error(f"Error marking commission paid for referral {referral_id}: {e}", exc_info=True)
         return {"status": "error", "message": f"Database error: {e}"}
 
+def admin_get_referral_payout_history(db_session: Session, page: int = 1, per_page: int = 20, 
+                                      sort_by: Optional[str] = "payout_initiated_at", 
+                                      sort_order: Optional[str] = "desc", 
+                                      referral_id_filter: Optional[int] = None, 
+                                      admin_user_id_filter: Optional[int] = None):
+    """
+    Retrieves a paginated history of referral commission payouts for administrators.
+    """
+    AdminUser = aliased(User, name="admin_user")
+    query = db_session.query(ReferralPayoutLog, AdminUser.username.label("admin_username"))\
+                      .outerjoin(AdminUser, ReferralPayoutLog.admin_user_id == AdminUser.id)
+
+    # Filtering
+    if referral_id_filter is not None:
+        query = query.filter(ReferralPayoutLog.referral_id == referral_id_filter)
+    if admin_user_id_filter is not None:
+        query = query.filter(ReferralPayoutLog.admin_user_id == admin_user_id_filter)
+
+    # Sorting
+    sort_column_map = {
+        "log_id": ReferralPayoutLog.id,
+        "referral_id": ReferralPayoutLog.referral_id,
+        "admin_username": AdminUser.username,
+        "amount_paid": ReferralPayoutLog.amount_paid,
+        "payout_initiated_at": ReferralPayoutLog.payout_initiated_at,
+    }
+    
+    sort_attr = sort_column_map.get(sort_by, ReferralPayoutLog.payout_initiated_at)
+    
+    if sort_order.lower() == "desc":
+        query = query.order_by(desc(sort_attr))
+    else:
+        query = query.order_by(sort_attr)
+        
+    total_items = query.count()
+    
+    logs_page_data = query.offset((page - 1) * per_page).limit(per_page).all()
+
+    items = []
+    for log, admin_username_val in logs_page_data:
+        items.append({
+            "log_id": log.id,
+            "referral_id": log.referral_id,
+            "admin_user_id": log.admin_user_id,
+            "admin_username": admin_username_val, # This comes from the labeled column
+            "amount_paid": log.amount_paid,
+            "payout_initiated_at": log.payout_initiated_at, # Already datetime
+            "notes": log.notes
+        })
+    
+    total_pages = (total_items + per_page - 1) // per_page if per_page > 0 else 0
+    
+    logger.debug(f"Admin retrieved referral payout history page {page}. Found {total_items} total.")
+    return {
+        "status": "success", 
+        "items": items,
+        "total_items": total_items, 
+        "page": page, 
+        "per_page": per_page,
+        "total_pages": total_pages
+    }
+
 # TODO: Function for admin to adjust commission rates or referral program settings (if stored in DB)
-# TODO: Function for admin to view payout history/logs

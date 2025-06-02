@@ -8,9 +8,12 @@ from backend.schemas.strategy_schemas import (
     StrategyDetailResponse,
     UserStrategySubscriptionCreateRequest,
     UserStrategySubscriptionActionResponse,
-    UserStrategySubscriptionListResponse
+    UserStrategySubscriptionListResponse,
+    UserStrategySubscriptionDetailResponse, # Added new response model
+    UserSubscriptionUpdateParamsRequest # Added for the new endpoint
 )
-from backend.services import strategy_service
+from backend.schemas import user_schemas # Already here for GeneralResponse
+from backend.services import strategy_service # Already here
 from backend.models import User
 from backend.db import get_db
 from backend.api.v1.auth_router import get_current_active_user # Dependency for protected routes
@@ -77,6 +80,85 @@ async def list_my_subscriptions(
     # This service function currently always returns success status
     return result
 
-# TODO: Add endpoint to get details of a specific user subscription
-# TODO: Add endpoint for user to deactivate/cancel their subscription
-# TODO: Add endpoint to update custom_parameters for an existing, active subscription (if allowed)
+@router.get("/subscriptions/me/{subscription_id}", response_model=UserStrategySubscriptionDetailResponse)
+async def get_my_specific_subscription(
+    subscription_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Retrieves details for a specific strategy subscription belonging to the current user.
+    """
+    result = strategy_service.get_user_subscription_details(
+        db_session=db,
+        user_id=current_user.id,
+        subscription_id=subscription_id
+    )
+
+    if result["status"] == "error":
+        # Consider if "Subscription not found or access denied." should be 403 if user is wrong,
+        # but 404 is fine as it obscures whether the sub exists at all from other users.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result["message"])
+    
+    return result["subscription"] # The service returns the subscription dict directly under this key
+
+@router.post("/subscriptions/me/{subscription_id}/deactivate", response_model=user_schemas.GeneralResponse)
+async def deactivate_my_subscription(
+    subscription_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Deactivates a specific strategy subscription for the currently authenticated user.
+    """
+    result = strategy_service.deactivate_strategy_subscription(
+        db_session=db,
+        user_id=current_user.id,
+        subscription_id=subscription_id,
+        by_admin=False # User is deactivating their own subscription
+    )
+
+    if result["status"] == "error":
+        if "not found" in result.get("message", "").lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result["message"])
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
+    
+    # For "success" or "info" (e.g., "already inactive"), the service response structure
+    # (e.g., {"status": "info", "message": "..."}) matches GeneralResponse.
+    return result
+
+@router.put("/subscriptions/me/{subscription_id}/parameters", response_model=user_schemas.GeneralResponse)
+async def update_my_subscription_parameters(
+    subscription_id: int,
+    payload: UserSubscriptionUpdateParamsRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Updates the custom parameters for a specific, active strategy subscription
+    belonging to the currently authenticated user. This involves restarting the strategy.
+    """
+    result = strategy_service.update_user_subscription_parameters(
+        db_session=db,
+        user_id=current_user.id,
+        subscription_id=subscription_id,
+        new_custom_parameters=payload.custom_parameters
+    )
+
+    if result["status"] == "error":
+        message = result.get("message", "An unexpected error occurred.")
+        if "not found" in message.lower() or "access denied" in message.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+        elif "not active" in message.lower() or "expired" in message.lower() or "invalid parameters" in message.lower():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
+        else: # For internal errors like failing to stop/start task, or DB errors during the process
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=message)
+            
+    # For "success" status, the service returns a dict that matches GeneralResponse
+    # e.g. {"status": "success", "message": "...", "new_task_id": "..." }
+    # GeneralResponse only has status and message, so new_task_id won't be typed
+    # but will be part of the JSON response if the service includes it.
+    # If new_task_id is critical for client, a more specific response_model is needed.
+    # For now, per plan, GeneralResponse is used.
+    return result

@@ -77,6 +77,9 @@ class AdminSiteSettingsResponse(BaseModel):
     status: str
     settings: dict[str, Any]
 
+class ReferralCommissionRateUpdateRequest(BaseModel):
+    new_rate: float = Field(..., gt=0, lt=1, description="New referral commission rate, e.g., 0.1 for 10%. Must be between 0 and 1 (exclusive of 0).")
+
 # General response for admin actions
 class AdminActionResponse(BaseModel):
     status: str

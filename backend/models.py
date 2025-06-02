@@ -266,9 +266,39 @@ class Referral(Base):
 
     referrer = relationship("User", foreign_keys=[referrer_user_id], back_populates="referrals_made")
     # referred_user = relationship("User", foreign_keys=[referred_user_id]) # Avoids issues with multiple relationships to User
+    payout_logs = relationship("ReferralPayoutLog", back_populates="referral", cascade="all, delete-orphan")
+
 
     def __repr__(self):
         return f"<Referral(id={self.id}, referrer_id={self.referrer_user_id}, referred_id={self.referred_user_id})>"
+
+class ReferralPayoutLog(Base):
+    __tablename__ = "referral_payout_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    referral_id = Column(Integer, ForeignKey("referrals.id"), nullable=False, index=True)
+    admin_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True) # Nullable if system can initiate
+    amount_paid = Column(Float, nullable=False)
+    payout_initiated_at = Column(DateTime, default=datetime.datetime.utcnow)
+    notes = Column(Text, nullable=True)
+
+    referral = relationship("Referral", back_populates="payout_logs")
+    admin = relationship("User") # No back_populates on User for this, simplifying
+
+    def __repr__(self):
+        return f"<ReferralPayoutLog(id={self.id}, referral_id={self.referral_id}, amount_paid={self.amount_paid})>"
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    key = Column(String(100), primary_key=True, index=True) # e.g., "referral_commission_rate"
+    value = Column(Text, nullable=False) # Store rate as string, e.g., "0.10"
+    description = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return f"<SystemSetting(key='{self.key}', value='{self.value}')>"
+
 
 # Function to initialize database engine and session (call this from your main app setup)
 def init_db(database_url: str):

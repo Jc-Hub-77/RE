@@ -1,7 +1,7 @@
 # backend/api/v1/referral_router.py
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional, Optional # Adding Optional again just in case
+from typing import List, Optional # Removed duplicate Optional
 
 from backend.schemas import referral_schemas, user_schemas # user_schemas for GeneralResponse
 from backend.services import referral_service
@@ -47,17 +47,22 @@ async def admin_list_referrals(
     # This service function is expected to always return status: success
     return result
 
-@router.post("/{referral_id}/mark-paid", response_model=referral_schemas.AdminReferralActionResponse, dependencies=[Depends(get_current_active_admin_user)])
+@router.post("/{referral_id}/mark-paid", response_model=referral_schemas.AdminReferralActionResponse)
 async def admin_mark_referral_commission_paid(
     referral_id: int,
     payout_data: referral_schemas.AdminMarkCommissionPaidRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_active_admin_user) # Added current_admin as parameter
 ):
     """
     Admin action to mark a specific amount of pending commission as paid for a referral record.
     """
     result = referral_service.mark_referral_commission_paid_admin(
-        db, referral_id, payout_data.amount_paid, payout_data.notes
+        db_session=db, # Pass db as db_session
+        referral_id=referral_id, 
+        amount_paid=payout_data.amount_paid, 
+        notes=payout_data.notes,
+        performing_admin_id=current_admin.id # Pass the admin's ID
     )
     if result["status"] == "error":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])

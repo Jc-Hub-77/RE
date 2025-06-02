@@ -225,6 +225,66 @@ def list_user_subscriptions(db_session: Session, user_id: int) -> Dict[str, Any]
     return {"status": "success", "subscriptions": user_subs_display}
 
 
+def get_user_subscription_details(db_session: Session, user_id: int, subscription_id: int) -> Dict[str, Any]:
+    """
+    Retrieves detailed information for a specific user subscription, including strategy name and API key label.
+    """
+    try:
+        subscription = db_session.query(UserStrategySubscription).filter(
+            UserStrategySubscription.id == subscription_id,
+            UserStrategySubscription.user_id == user_id
+        ).options(
+            sqlalchemy.orm.joinedload(UserStrategySubscription.strategy),
+            sqlalchemy.orm.joinedload(UserStrategySubscription.api_key)
+        ).first()
+
+        if not subscription:
+            logger.warning(f"Subscription ID {subscription_id} not found for user ID {user_id} or access denied.")
+            return {"status": "error", "message": "Subscription not found or access denied."}
+
+        now = datetime.datetime.utcnow()
+        
+        is_currently_active = subscription.is_active and \
+                              (subscription.expires_at > now if subscription.expires_at else True)
+        
+        time_remaining_seconds = 0
+        if subscription.expires_at and subscription.expires_at > now:
+            time_remaining_seconds = int((subscription.expires_at - now).total_seconds())
+
+        custom_params_dict = {}
+        if subscription.custom_parameters:
+            try:
+                custom_params_dict = json.loads(subscription.custom_parameters)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse custom_parameters JSON for subscription {subscription.id}: {subscription.custom_parameters}", exc_info=True)
+                custom_params_dict = {"error": "Could not parse parameters"}
+
+        formatted_details = {
+            "id": subscription.id,
+            "user_id": subscription.user_id,
+            "strategy_id": subscription.strategy_id,
+            "strategy_name": subscription.strategy.name if subscription.strategy else "N/A",
+            "api_key_id": subscription.api_key_id,
+            "api_key_label": subscription.api_key.label if subscription.api_key else "N/A",
+            "custom_parameters": custom_params_dict,
+            "is_active": is_currently_active, # Calculated current operational status
+            "db_is_active_flag": subscription.is_active, # Raw DB flag
+            "status_message": subscription.status_message,
+            "subscribed_at": subscription.subscribed_at, # Direct datetime object
+            "expires_at": subscription.expires_at, # Direct datetime object
+            "time_remaining_seconds": time_remaining_seconds,
+            "celery_task_id": subscription.celery_task_id,
+            "is_currently_active": is_currently_active # Explicitly added as per schema
+        }
+        
+        logger.info(f"Fetched details for subscription ID {subscription_id} for user ID {user_id}.")
+        return {"status": "success", "subscription": formatted_details}
+
+    except Exception as e:
+        logger.error(f"Error retrieving subscription details for sub ID {subscription_id}, user ID {user_id}: {e}", exc_info=True)
+        return {"status": "error", "message": f"An unexpected error occurred: {str(e)}"}
+
+
 def deactivate_strategy_subscription(db_session: Session, user_id: int, subscription_id: int, by_admin: bool = False):
     """Deactivates a user's strategy subscription."""
     query = db_session.query(UserStrategySubscription).filter(UserStrategySubscription.id == subscription_id)
@@ -265,6 +325,113 @@ def deactivate_strategy_subscription(db_session: Session, user_id: int, subscrip
         logger.error(f"Error deactivating subscription ID {subscription_id}: {e}", exc_info=True)
         return {"status": "error", "message": f"Database error: {e}"}
 
+
+def update_user_subscription_parameters(db_session: Session, user_id: int, subscription_id: int, new_custom_parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Updates custom parameters for a user's active strategy subscription.
+    This involves stopping the current strategy, updating parameters, and restarting the strategy.
+    """
+    now = datetime.datetime.utcnow()
+    subscription = db_session.query(UserStrategySubscription).filter(
+        UserStrategySubscription.id == subscription_id,
+        UserStrategySubscription.user_id == user_id
+    ).first()
+
+    if not subscription:
+        logger.warning(f"Update params: Subscription ID {subscription_id} not found for user ID {user_id}.")
+        return {"status": "error", "message": "Subscription not found or access denied."}
+
+    if not subscription.is_active:
+        logger.warning(f"Update params: Subscription ID {subscription_id} for user {user_id} is not active.")
+        return {"status": "error", "message": "Subscription is not active. Parameters can only be updated for active subscriptions."}
+
+    if subscription.expires_at and subscription.expires_at < now:
+        logger.warning(f"Update params: Subscription ID {subscription_id} for user {user_id} has expired.")
+        return {"status": "error", "message": "Subscription has expired."}
+
+    # Parameter Validation (Conceptual)
+    strategy_db_obj = db_session.query(StrategyModel).filter(StrategyModel.id == subscription.strategy_id).first()
+    if not strategy_db_obj:
+        # This should ideally not happen if subscription integrity is maintained
+        logger.error(f"Update params: Strategy ID {subscription.strategy_id} not found for active subscription {subscription_id}.")
+        return {"status": "error", "message": "Associated strategy not found. Cannot validate parameters."}
+
+    StrategyClass = _load_strategy_class_from_db_obj(strategy_db_obj)
+    if StrategyClass and hasattr(StrategyClass, 'validate_parameters') and callable(getattr(StrategyClass, 'validate_parameters')):
+        try:
+            # The validate_parameters method should raise an exception for invalid params
+            # or return False. Let's assume it raises ValueError for this example.
+            is_valid = getattr(StrategyClass, 'validate_parameters')(new_custom_parameters)
+            if is_valid is False: # Explicitly check for False if it can return boolean
+                logger.warning(f"Update params: Validation failed for strategy {strategy_db_obj.name} with params: {new_custom_parameters}")
+                return {"status": "error", "message": "Invalid parameters for this strategy according to its validation logic."}
+        except ValueError as ve: # Catch specific validation errors
+            logger.warning(f"Update params: Parameter validation error for strategy {strategy_db_obj.name}: {ve}")
+            return {"status": "error", "message": f"Invalid parameters: {ve}"}
+        except Exception as e:
+            logger.error(f"Update params: Unexpected error during parameter validation for strategy {strategy_db_obj.name}: {e}", exc_info=True)
+            # Depending on policy, might allow update or deny. For safety, deny.
+            return {"status": "error", "message": "An unexpected error occurred during parameter validation."}
+    else:
+        logger.warning(f"Update params: Strategy {strategy_db_obj.name} has no 'validate_parameters' method. Skipping custom validation.")
+
+    # Stop the current strategy task
+    logger.info(f"Update params: Stopping strategy for subscription ID {subscription_id} (user {user_id}).")
+    stop_result = live_trading_service.stop_strategy(db_session=db_session, subscription_id=subscription_id, user_id=user_id)
+    
+    # stop_strategy should set is_active=False. If it failed but didn't error out (e.g. task not found), we proceed.
+    # If stop_strategy itself errored (e.g. DB issue), we'd catch it here if it raises.
+    # Assuming stop_strategy returns a dict like {"status": "success/error/info", "message": "..."}
+    if stop_result.get("status") == "error":
+        # If it's an error that means the task couldn't be signalled to stop, it might be risky to proceed.
+        # However, stop_strategy is also responsible for DB updates (is_active=False).
+        # Let's assume if status is "error", the state of the subscription might be uncertain or unchanged.
+        logger.error(f"Update params: Failed to stop strategy for subscription {subscription_id}. Reason: {stop_result.get('message')}")
+        return {"status": "error", "message": f"Failed to stop the current strategy task: {stop_result.get('message')}. Parameters not updated."}
+
+    # Update custom_parameters and status_message
+    try:
+        subscription.custom_parameters = json.dumps(new_custom_parameters)
+        subscription.status_message = "Parameters updated, preparing to restart strategy."
+        # is_active should have been set to False by stop_strategy. If not, ensure it here.
+        subscription.is_active = False 
+        db_session.commit()
+        db_session.refresh(subscription)
+        logger.info(f"Update params: Parameters for subscription {subscription_id} (user {user_id}) updated in DB.")
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Update params: DB error updating parameters for subscription {subscription_id}: {e}", exc_info=True)
+        return {"status": "error", "message": "Database error while updating parameters."}
+
+    # Restart the strategy task with new parameters
+    logger.info(f"Update params: Restarting strategy for subscription ID {subscription_id} (user {user_id}).")
+    # deploy_strategy should use the new custom_parameters from the DB
+    # It also needs user_id to correctly identify the subscription if it re-fetches.
+    deploy_result = live_trading_service.deploy_strategy(db_session=db_session, subscription_id=subscription_id, user_id=user_id)
+
+    if deploy_result.get("status") == "error":
+        logger.error(f"Update params: Failed to restart strategy for subscription {subscription_id} after param update. Reason: {deploy_result.get('message')}")
+        # The subscription parameters are updated, but the strategy isn't running.
+        # The status_message in the subscription should reflect this from deploy_strategy.
+        # If deploy_strategy doesn't update status_message on failure, do it here.
+        subscription.status_message = f"Parameters updated, but strategy restart failed: {deploy_result.get('message')}"
+        subscription.is_active = False # Ensure it's marked as inactive
+        try:
+            db_session.commit()
+        except Exception as e_commit:
+            db_session.rollback()
+            logger.error(f"Update params: DB error saving post-deploy-failure status for sub {subscription_id}: {e_commit}", exc_info=True)
+
+        return {"status": "error", "message": f"Parameters updated, but failed to restart the strategy: {deploy_result.get('message')}"}
+
+    # Success: deploy_strategy should have set is_active=True and updated celery_task_id and status_message
+    logger.info(f"Update params: Strategy for subscription {subscription_id} (user {user_id}) restarted successfully after parameter update.")
+    return {
+        "status": "success", 
+        "message": "Subscription parameters updated and strategy restarted successfully.",
+        "subscription_id": subscription_id, # Added for consistency
+        "new_task_id": deploy_result.get("celery_task_id") # Or task_id, depends on deploy_strategy response
+    }
 
 def admin_update_subscription_details(db_session: Session, subscription_id: int, 
                                    new_status_message: Optional[str] = None, 

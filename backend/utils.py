@@ -2,8 +2,10 @@ import os
 import importlib.util
 import json
 import logging
+from typing import Optional, Any # Added Optional, Any
+from sqlalchemy.orm import Session # Added Session
 
-from backend.models import Strategy as StrategyModel
+from backend.models import Strategy as StrategyModel, SystemSetting # Added SystemSetting
 from backend.config import settings
 
 # Initialize logger
@@ -72,3 +74,26 @@ def _load_strategy_class_from_db_obj(strategy_db_obj: StrategyModel):
     except Exception as e:
         logger.error(f"Error loading strategy module {module_name_from_path} for '{strategy_db_obj.name}': {e}", exc_info=True)
         return None
+
+def get_system_setting(db_session: Session, key: str, default_value: Optional[Any] = None) -> Optional[str]:
+    """
+    Retrieves a system setting value from the database.
+
+    Args:
+        db_session: The SQLAlchemy database session.
+        key: The key of the setting to retrieve.
+        default_value: The value to return if the key is not found.
+
+    Returns:
+        The value of the setting as a string if found, otherwise the default_value.
+    """
+    try:
+        setting = db_session.query(SystemSetting).filter(SystemSetting.key == key).first()
+        if setting:
+            return setting.value
+        else:
+            logger.debug(f"System setting for key '{key}' not found. Returning default value: {default_value}")
+            return default_value
+    except Exception as e:
+        logger.error(f"Error retrieving system setting for key '{key}': {e}", exc_info=True)
+        return default_value
