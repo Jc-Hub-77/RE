@@ -7,6 +7,7 @@ import os
 import importlib.util
 import logging
 import datetime # Import datetime
+from celery.result import AsyncResult
 
 from sqlalchemy.orm import Session
 
@@ -43,9 +44,26 @@ def deploy_strategy(db: Session, user_strategy_subscription_id: int): # Use DB s
         logger.warning(f"Subscription ID {user_strategy_subscription_id} has expired. Cannot deploy.")
         return {"status": "error", "message": "Subscription has expired."}
 
-    # TODO: Check if a task for this subscription is already running in Celery
-    # This requires querying the Celery worker's active/scheduled tasks or storing task ID in DB.
-    # For now, we'll rely on the task itself checking subscription status.
+    # Check if a task for this subscription is already running in Celery
+    if user_sub.celery_task_id:
+        task_result = AsyncResult(user_sub.celery_task_id, app=celery_app)
+        # Define states that are considered "active" or "not yet finished"
+        active_states = ['PENDING', 'RECEIVED', 'STARTED', 'RETRY']
+        # Define states that mean the task is finished and can be replaced
+        # CRITICAL is not a standard Celery state, but good to include if used. Standard is FAILURE.
+        terminal_states = ['SUCCESS', 'FAILURE', 'REVOKED', 'CRITICAL']
+
+        if task_result.state in active_states:
+            logger.info(f"Subscription ID {user_strategy_subscription_id} already has an active Celery task {user_sub.celery_task_id} in state {task_result.state}.")
+            return {"status": "info", "message": f"Strategy is already running or queued (Task ID: {user_sub.celery_task_id}, Status: {task_result.state})."}
+        elif task_result.state in terminal_states:
+            logger.info(f"Previous Celery task {user_sub.celery_task_id} for subscription ID {user_strategy_subscription_id} found in terminal state {task_result.state}. Proceeding with new deployment.")
+            user_sub.celery_task_id = None # Clear the old task ID
+            # Relying on the later commit to persist this change
+        else: # Task state is unknown or something else (e.g. custom state)
+            logger.warning(f"Previous Celery task {user_sub.celery_task_id} for subscription ID {user_strategy_subscription_id} in unexpected state {task_result.state}. Caution advised. Proceeding with new deployment.")
+            user_sub.celery_task_id = None # Clear the old task ID
+            # Relying on the later commit
 
     try:
         # Send the task to the Celery queue

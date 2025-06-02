@@ -2,6 +2,7 @@
 import datetime
 import os
 import logging
+from typing import Optional # Ensure Optional is imported
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_ # For count, desc, or_
 import sqlalchemy 
@@ -320,10 +321,17 @@ def update_strategy_admin(db_session: Session, strategy_id: int, updates: dict):
 
 
 # --- Admin Subscriptions & Payments Overview ---
-def list_all_subscriptions_admin(db_session: Session, page: int = 1, per_page: int = 20):
-    """Lists all user strategy subscriptions with pagination."""
+def list_all_subscriptions_admin(db_session: Session, page: int = 1, per_page: int = 20, user_id: Optional[int] = None, strategy_id: Optional[int] = None, is_active: Optional[bool] = None):
+    """Lists all user strategy subscriptions with pagination and filtering."""
     try:
         query = db_session.query(UserStrategySubscription).join(User).join(Strategy).outerjoin(ApiKey) # outerjoin for ApiKey
+
+        if user_id is not None:
+            query = query.filter(UserStrategySubscription.user_id == user_id)
+        if strategy_id is not None:
+            query = query.filter(UserStrategySubscription.strategy_id == strategy_id)
+        if is_active is not None:
+            query = query.filter(UserStrategySubscription.is_active == is_active)
 
         total_subscriptions = query.count()
         # Order by subscription ID descending by default for recent items first
