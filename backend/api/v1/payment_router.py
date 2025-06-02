@@ -90,9 +90,9 @@ async def admin_list_all_payment_transactions(
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
-    user_id: Optional[int] = Query(None),
-    status: Optional[str] = Query(None),
-    gateway: Optional[str] = Query(None)
+    user_id: Optional[int] = Query(None), 
+    status: Optional[str] = Query(None), 
+    gateway: Optional[str] = Query(None) 
 ):
     result = payment_service.list_all_payment_transactions(db, page, per_page, user_id, status, gateway)
     return result
@@ -112,7 +112,7 @@ async def admin_update_payment_transaction_status(
     transaction_id: int,
     update_request: payment_schemas.AdminPaymentStatusUpdateRequest,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_active_admin_user)
+    current_admin: User = Depends(get_current_active_admin_user) 
 ):
     result = payment_service.admin_manual_update_payment_status(
         db_session=db,

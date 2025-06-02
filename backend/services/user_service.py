@@ -321,7 +321,7 @@ def change_password(db_session: Session, user_id: int, old_password: str, new_pa
     try:
         db_session.commit()
         logger.info(f"Password changed successfully for user {user.username} (ID: {user.id}).")
-
+        
         # Send password change notification email
         email_subject = "Your Password Has Been Changed"
         email_body = (
