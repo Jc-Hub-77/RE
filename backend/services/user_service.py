@@ -333,7 +333,7 @@ def change_password(db_session: Session, user_id: int, old_password: str, new_pa
         send_email_task.delay(to_email=user.email, subject=email_subject, body=email_body)
         logger.info(f"Password change notification email queued for {user.email}.")
 
-        # TODO: Invalidate other active sessions/tokens for this user (e.g., by managing a token blacklist or session store)
+        # NOTE: Session invalidation for other active tokens is handled by checking the token's 'iat' (issued at) claim against the user.last_password_change_at timestamp in `auth_router.get_current_user`. Tokens issued before the last password change are rejected. For immediate invalidation of all sessions (e.g., distributed systems), a more complex solution like a token blacklist might be considered in the future.
         return {"status": "success", "message": "Password changed successfully."}
     except Exception as e:
         db_session.rollback()
@@ -409,7 +409,7 @@ def reset_password_with_token(db_session: Session, token: str, new_password: str
         send_email_task.delay(to_email=user.email, subject=email_subject, body=email_body)
         logger.info(f"Password reset confirmation email queued for {user.email}.")
 
-        # TODO: Invalidate other active sessions/tokens for this user.
+        # NOTE: Session invalidation for other active tokens is handled by checking the token's 'iat' (issued at) claim against the user.last_password_change_at timestamp in `auth_router.get_current_user`. Tokens issued before the last password change (including this reset) are rejected. For immediate invalidation of all sessions (e.g., distributed systems), a more complex solution like a token blacklist might be considered in the future.
         return {"status": "success", "message": "Password has been reset successfully."}
     except Exception as e:
         db_session.rollback()

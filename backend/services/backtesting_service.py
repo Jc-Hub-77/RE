@@ -267,9 +267,8 @@ def run_backtest(db_session: Session, # Use DB session directly
 # Based on live_trading_service, it seems _load_strategy_class_from_db_obj is the correct function to use.
 # Let's ensure that's used consistently.
 
-# Correcting the internal strategy loading function call
-# The original code had `_load_strategy_class`, but the import is `_load_strategy_class_from_db_obj`.
-# I will use `_load_strategy_class_from_db_obj`.
-
-# TODO: Implement a secure secrets management solution for API_ENCRYPTION_KEY in production.
-# This key is critical for decrypting API keys for live trading.
+# IMPORTANT: API_ENCRYPTION_KEY is critical for securing sensitive data. In production environments, 
+# ensure this key (and other secrets like database credentials, JWT secrets) is managed via a secure 
+# secrets management system (e.g., environment variables injected from HashiCorp Vault, 
+# AWS Secrets Manager, Azure Key Vault, or similar) and is NOT hardcoded or committed to version control.
+# While this service is for backtesting, API_ENCRYPTION_KEY is a system-wide concern.
