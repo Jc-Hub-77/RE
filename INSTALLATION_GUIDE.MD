@@ -25,18 +25,42 @@ The backend (FastAPI application, Celery workers, PostgreSQL database, Redis) wi
 
 ### 3.1. Configure Environment Variables
 
-All backend configurations are managed via environment variables. The production Docker Compose file (`docker-compose.prod.yml`) expects these to be present in the environment where `docker-compose` is run, or in a `.env` file located at `backend/.env`.
+All backend configurations are managed via environment variables. For **production environments, these variables should be injected directly by your deployment platform or server environment.** This is the most secure method. The production Docker Compose file (`docker-compose.prod.yml`) is designed to use these externally provided variables. Refer to `SECRETS.MD` for more details on secret management strategies.
 
-1.  **Navigate to the backend directory:**
-    ```bash
-    cd backend
-    ```
-2.  **Create a `.env` file from the example:**
-    ```bash
-    cp .env.example .env
-    ```
-3.  **Edit the `.env` file (`nano .env` or `vim .env`):**
-    Update the following variables with your **production values**. **Do NOT use default or example values for sensitive information.**
+**Using `backend/.env` for Local Development:**
+
+For local development convenience, you can use a `.env` file located at `backend/.env`.
+1.  Navigate to the `backend` directory: `cd backend`
+2.  Create a `.env` file from the example: `cp .env.example .env`
+3.  Edit the `.env` file (`nano .env` or `vim .env`) with your development settings.
+
+**Using `backend/.env` in Production (Discouraged):**
+
+If you must use a `backend/.env` file in a simpler production setup (e.g., a single VPS where direct environment injection is complex to configure), it is **strongly discouraged** as it's less secure. If you choose this path, you **must**:
+*   **Secure the file:** Change its permissions to `chmod 600 backend/.env` so only the owner can read and write it.
+*   **Exclude from Docker image:** Ensure your `backend/.dockerignore` (or global `.gitignore` if not building images directly on the VPS) prevents the `.env` file from being copied into any Docker image.
+*   **Acknowledge the risk:** Understand that this method is less secure than injecting environment variables directly.
+
+**Variables to be Set:**
+
+> **IMPORTANT: Secure Your Production Configuration!**
+>
+> The environment variables listed below include placeholders and examples (e.g., in `backend/.env.example` or default values in `backend/config.py`). **These are NOT secure for production and MUST be replaced with your own unique, strong, and secret values.**
+>
+> Failure to do so will expose your application to significant security risks.
+>
+> **Key variables requiring your immediate attention for production:**
+> *   `JWT_SECRET_KEY`: Default example values are insecure. Generate a new one.
+> *   `API_ENCRYPTION_KEY`: Default example values are insecure. Generate a new one.
+> *   `POSTGRES_PASSWORD`: Use a strong, unique password.
+> *   All SMTP credentials (`SMTP_USER`, `SMTP_PASSWORD`).
+> *   All Payment Gateway credentials (e.g., `COINBASE_COMMERCE_API_KEY`, `COINBASE_COMMERCE_WEBHOOK_SECRET`).
+> *   `ALLOWED_ORIGINS`: Set this to your specific frontend domain(s).
+> *   `FRONTEND_URL`: Set this to your specific frontend URL.
+>
+> Review **every** variable to ensure it's correctly configured for your production environment. Refer to `backend/SECRETS.MD` for more details on secrets management best practices.
+
+Regardless of the method chosen for setting them (preferably direct injection for production), the following variables need to be configured with your **production values**. **Do NOT use default or example values for sensitive information.**
 
     **Critical Variables:**
     *   `POSTGRES_USER`: Your desired PostgreSQL username.
@@ -69,12 +93,12 @@ All backend configurations are managed via environment variables. The production
     *   `CELERY_WORKER_REPLICAS`: (Optional, set in `docker-compose.prod.yml` if not overridden by environment, defaults to 2) Number of Celery worker containers.
     *   `ENVIRONMENT`: Set to `production`.
 
-    **Important Note on Secrets:** For enhanced security in production, consider injecting these secrets directly as environment variables at runtime via your VPS provider's interface or a secrets management tool, rather than solely relying on the `.env` file. However, for a single VPS setup, a well-protected `.env` file (with appropriate file permissions `chmod 600 backend/.env`) is a common starting point.
+**After configuring your environment variables (either externally or via `.env` for development/discouraged production use):**
 
-4.  **Return to the project root directory:**
-    ```bash
-    cd ..
-    ```
+If you created/modified a `.env` file in the `backend` directory, return to the project root:
+```bash
+cd ..
+```
 
 ### 3.2. Build and Run Backend Services
 

@@ -17,6 +17,21 @@ This document provides a checklist of crucial considerations and recommendations
     - Payment gateway keys.
     - `STRATEGIES_DIR` pointing to the correct location.
     - `FRONTEND_URL` and `ALLOWED_ORIGINS` for CORS.
+- [ ] **Strategy `payment_options_json` Field:** Understand and correctly configure the `payment_options_json` field for each `Strategy` model instance. This field is critical for defining subscription tiers.
+    *   **Format:** It must be a valid JSON string representing a list of payment options.
+    *   **Structure:** Each item in the list is an object with the following keys:
+        *   `months` (integer): The duration of the subscription period in months.
+        *   `price_usd` (float): The price for this period in USD.
+        *   `description` (string, optional): A brief description for this payment option (e.g., "1 Month Access", "Annual Plan (Best Value)").
+    *   **Example:**
+        ```json
+        [
+          {"months": 1, "price_usd": 19.99, "description": "1 Month Access"},
+          {"months": 3, "price_usd": 49.99, "description": "3 Months Access (Save 15%)"},
+          {"months": 12, "price_usd": 179.99, "description": "1 Year Access (Best Value)"}
+        ]
+        ```
+    *   **Configuration:** This field is typically set by an administrator via the admin interface when creating or editing a strategy. Ensure the JSON is well-formed and accurately reflects the intended subscription options.
 - [ ] **Frontend API URL:** Ensure `frontend/js/config.js` has `window.BACKEND_API_BASE_URL = "";` if serving frontend and backend API via a reverse proxy on the same domain.
 - [ ] **Nginx/Reverse Proxy:** Implement Nginx (or similar) as a reverse proxy to:
     - Serve the static frontend files.
@@ -55,6 +70,7 @@ This document provides a checklist of crucial considerations and recommendations
 - [ ] **Performance Tuning:** Monitor and tune database performance (query optimization, indexing).
 - [ ] **Regular Backups:** Implement and regularly test a reliable database backup and recovery strategy.
 - [ ] **Connection Pooling:** Ensure database connection pooling is appropriately configured for the expected load (FastAPI/SQLAlchemy usually handles this, but settings might need tuning).
+- [ ] **Enhance Payment Charge Metadata Storage:** Consider enhancing the `PaymentTransaction` model by adding a dedicated field, such as `charge_metadata_json: Text` (or `gateway_metadata: JSONB` if using PostgreSQL and SQLAlchemy supports it well). Storing the raw metadata JSON received from the payment gateway (or generated internally before sending to the gateway) in this structured field would be more robust for debugging, manual recovery, and future analysis than relying on parsing it from the `description` field. This aligns with the `IDEAL` comment noted in `backend/services/payment_service.py`.
 
 ## VI. Scalability & Reliability
 - [ ] **Load Testing:** Conduct load testing to understand performance bottlenecks and determine appropriate scaling for Gunicorn workers, Celery workers, and database resources.
