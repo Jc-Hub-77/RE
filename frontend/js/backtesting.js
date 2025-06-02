@@ -40,8 +40,8 @@ document.addEventListener('DOMContentLoaded', () => {
         height: 400,
         layout: {
             textColor: isDarkMode ? getCssVariable('--dm-text-color') : getCssVariable('--text-color'),
-            background: {
-                type: 'solid',
+            background: { 
+                type: 'solid', 
                 color: isDarkMode ? getCssVariable('--dm-surface-color') : getCssVariable('--card-background')
             },
             fontSize: 12,
@@ -147,7 +147,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 paramsGrid.className = 'form-grid';
                 for (const paramName in data.details.parameters_definition) {
                     const paramDef = data.details.parameters_definition[paramName];
-                    const paramGroup = document.createElement('div');
+                    const paramGroup = document.createElement('div'); 
                     paramGroup.className = 'form-group';
                     const label = document.createElement('label');
                     label.setAttribute('for', `param_${paramName}`);
@@ -184,13 +184,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     input.required = paramDef.required || false;
                     
                     paramGroup.appendChild(label); 
-                    if (paramDef.type === "bool") {
+                    if (paramDef.type === "bool") { 
                         const wrapper = document.createElement('div');
                         wrapper.style.display = 'flex';
                         wrapper.style.alignItems = 'center';
                         input.style.marginRight = '10px';
                         wrapper.appendChild(input);
-                        wrapper.appendChild(label);
+                        wrapper.appendChild(label); 
                         paramGroup.appendChild(wrapper);
                     } else {
                         paramGroup.appendChild(input);
@@ -307,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         return;
                     }
                     console.warn(`Polling error for backtest ID ${backtestId}: HTTP ${response.status}`);
-                    return;
+                    return; 
                 }
                 
                 const results = await response.json();
@@ -323,7 +323,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 } else if (results.status === "running" || results.status === "queued") {
                     resultsLoading.textContent = `Backtest is ${results.status}. Polling... (Attempt ${attempts}/${maxAttempts})`;
-                } else {
+                } else { 
                     clearInterval(intervalId);
                     resultsLoading.style.display = 'none';
                     metricsSummaryContainer.innerHTML = `<p class="error-message">Unknown backtest status: ${results.status}. Message: ${results.status_message}</p>`;
@@ -352,7 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const ohlcvDataForChart = details.ohlcv_data ? details.ohlcv_data.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })) : [];
         const equityCurveForChart = details.equity_curve ? details.equity_curve.map(d => ({ time: d.time, value: d.value })) : [];
-
+        
         const tradesLogForChart = details.trades_log ? details.trades_log.map(t => ({
             time: t.entry_time,
             position: t.type === 'long' ? 'belowBar' : 'aboveBar',
@@ -367,7 +367,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     tradesLogForChart.push({
                         time: trade.exit_time,
                         position: trade.type === 'long' ? 'aboveBar' : 'belowBar',
-                        color: getCssVariable('--dark-gray'),
+                        color: getCssVariable('--dark-gray'), 
                         shape: trade.type === 'long' ? 'arrowDown' : 'arrowUp',
                         text: `Exit ${trade.type.toUpperCase()} @ ${trade.exit_price.toFixed(2)} (P: ${trade.pnl.toFixed(2)})`
                     });
@@ -393,9 +393,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (equityChart) equityChart.remove();
         const equityChartSpecificOptions = { ...commonChartOptions(isDarkMode), width: equityChartContainer.clientWidth };
         equityChart = LightweightCharts.createChart(equityChartContainer, equityChartSpecificOptions);
-        equitySeries = equityChart.addLineSeries({
+        equitySeries = equityChart.addLineSeries({ 
             color: isDarkMode ? getCssVariable('--dm-primary-color') : getCssVariable('--primary-color'),
-            lineWidth: 2
+            lineWidth: 2 
         });
         if (equityCurveForChart.length > 0) equitySeries.setData(equityCurveForChart);
         equityChart.timeScale().fitContent();
@@ -412,7 +412,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.insertCell().textContent = trade.size || 'N/A';
                 row.insertCell().textContent = trade.take_profit ? trade.take_profit.toFixed(2) : 'N/A';
                 row.insertCell().textContent = trade.stop_loss ? trade.stop_loss.toFixed(2) : 'N/A';
-
+                
                 const pnlCell = row.insertCell();
                 const pnlValue = trade.pnl !== undefined ? parseFloat(trade.pnl) : NaN;
                 pnlCell.textContent = !isNaN(pnlValue) ? pnlValue.toFixed(2) : 'N/A';
@@ -439,8 +439,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 wickDownColor: getCssVariable('--danger-color'),
             });
             if (equityChart) equityChart.applyOptions(newEquityChartOptions);
-            if (equitySeries) equitySeries.applyOptions({
-                color: isDarkMode ? getCssVariable('--dm-primary-color') : getCssVariable('--primary-color')
+            if (equitySeries) equitySeries.applyOptions({ 
+                color: isDarkMode ? getCssVariable('--dm-primary-color') : getCssVariable('--primary-color') 
             });
         });
     }

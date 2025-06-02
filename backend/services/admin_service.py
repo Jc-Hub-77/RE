@@ -332,7 +332,7 @@ def list_all_subscriptions_admin(db_session: Session, page: int = 1, per_page: i
             query = query.filter(UserStrategySubscription.strategy_id == strategy_id)
         if is_active is not None:
             query = query.filter(UserStrategySubscription.is_active == is_active)
-
+        
         total_subscriptions = query.count()
         # Order by subscription ID descending by default for recent items first
         subscriptions_data = query.order_by(desc(UserStrategySubscription.id)).offset((page - 1) * per_page).limit(per_page).all()

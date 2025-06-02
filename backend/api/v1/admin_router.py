@@ -120,8 +120,8 @@ async def admin_list_all_subscriptions(
     is_active: Optional[bool] = Query(None, description="Filter by active status")
 ):
     result = admin_service.list_all_subscriptions_admin(
-        db,
-        page=page,
+        db, 
+        page=page, 
         per_page=per_page,
         user_id=user_id,
         strategy_id=strategy_id,

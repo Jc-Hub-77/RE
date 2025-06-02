@@ -11,10 +11,10 @@ from coinbase_commerce.webhook import Webhook
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
-from backend.models import User, UserStrategySubscription, PaymentTransaction
-from backend.config import settings
-from backend.services import strategy_service
-from backend.services import referral_service
+from backend.models import User, UserStrategySubscription, PaymentTransaction 
+from backend.config import settings 
+from backend.services import strategy_service 
+from backend.services import referral_service 
 from backend.schemas import payment_schemas # Import payment_schemas
 
 # Initialize logger
@@ -42,7 +42,7 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
     Activates/renews subscriptions and processes referrals.
     """
     logger.info(f"Processing successful payment for transaction ID: {payment_transaction.id}, Internal Ref: {payment_transaction.internal_reference}")
-
+    
     user_id = int(metadata.get('user_id'))
     item_id_str = metadata.get('item_id') # Can be strategy_id or user_strategy_subscription_id
     item_type = metadata.get('item_type')
@@ -54,7 +54,7 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
         payment_transaction.status_message = "Processing Error: Missing critical metadata."
         db_session.commit()
         return False
-
+    
     item_id = int(item_id_str)
 
     try:
@@ -78,14 +78,14 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
 
         elif item_type == "renew_strategy_subscription":
             existing_sub = db_session.query(UserStrategySubscription).filter(
-                UserStrategySubscription.id == item_id,
+                UserStrategySubscription.id == item_id, 
                 UserStrategySubscription.user_id == user_id
             ).first()
 
             if existing_sub:
                 sub_result = strategy_service.create_or_update_strategy_subscription(
                     db_session=db_session, user_id=user_id, strategy_db_id=existing_sub.strategy_id,
-                    api_key_id=existing_sub.api_key_id,
+                    api_key_id=existing_sub.api_key_id, 
                     custom_parameters=json.loads(existing_sub.custom_parameters) if isinstance(existing_sub.custom_parameters, str) else existing_sub.custom_parameters,
                     subscription_months=subscription_months, existing_subscription_id=existing_sub.id,
                     payment_transaction_id=payment_transaction.id
@@ -100,7 +100,7 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
                 payment_transaction.status_message = f"Renewal failed: Subscription {item_id} not found."
                 db_session.commit()
                 return False
-
+        
         # elif item_type == "platform_access": (handle platform-wide subscription activation/renewal)
         else:
             logger.warning(f"Unsupported item_type '{item_type}' for payment {payment_transaction.id}.")
@@ -118,7 +118,7 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
             current_status_message = payment_transaction.status_message or ""
             payment_transaction.status_message = (current_status_message + f" | Referral processing error: {referral_result['message']}").strip(" | ")
             # Not returning False here as primary payment processing (subscription) might have succeeded.
-
+        
         payment_transaction.status_message = payment_transaction.status_message or "Successfully processed."
         db_session.commit()
         logger.info(f"Successfully processed payment {payment_transaction.id} and associated actions.")
@@ -131,14 +131,14 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
         return False
 
 # --- Payment Gateway Interaction ---
-def create_coinbase_commerce_charge(db_session: Session, user_id: int,
-                                   item_id: int,
-                                   item_type: str,
-                                   item_name: str,
+def create_coinbase_commerce_charge(db_session: Session, user_id: int, 
+                                   item_id: int, 
+                                   item_type: str, 
+                                   item_name: str, 
                                    item_description: str,
                                    amount_usd: float,
-                                   subscription_months: int = 1,
-                                   redirect_url: str = None,
+                                   subscription_months: int = 1, 
+                                   redirect_url: str = None, 
                                    cancel_url: str = None,
                                    metadata: Optional[Dict[str, Any]] = None
                                    ):
@@ -155,7 +155,7 @@ def create_coinbase_commerce_charge(db_session: Session, user_id: int,
         'subscription_months': str(subscription_months),
         'payment_amount_usd': str(amount_usd) # Add payment_amount_usd for _process_successful_payment
     })
-
+    
     # Store all metadata in description or a dedicated field if model is updated
     # For now, ensure description is comprehensive for manual reconstruction if needed.
     charge_description = f"Charge for {item_name} ({item_type}, Item ID: {item_id}, User: {user_id}, SubMonths: {subscription_months}). Metadata: {json.dumps(metadata_for_charge)}"
@@ -170,7 +170,7 @@ def create_coinbase_commerce_charge(db_session: Session, user_id: int,
         crypto_currency="USD_PRICED", # Indicates this is the target USD value
         payment_gateway="CoinbaseCommerce_Simulated" if not coinbase_client else "CoinbaseCommerce",
         status="pending_gateway_interaction",
-        created_at=datetime.datetime.utcnow(),
+        created_at=datetime.datetime.utcnow(), 
         updated_at=datetime.datetime.utcnow(),
         description=charge_description, # Store detailed description
         # charge_metadata_json=json.dumps(metadata_for_charge) # IDEAL: if model had this field
@@ -262,7 +262,7 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
     # Example: pricing.local.amount, pricing.local.currency for final amount
     # payments[0].value.local.amount for actual payment amount
     # payments[0].value.crypto.amount, payments[0].value.crypto.currency for crypto details
-
+    
     timeline_statuses = [s['status'].upper() for s in charge_obj_from_webhook.timeline]
     new_status_from_webhook = "pending_payment" # default
     if 'COMPLETED' in timeline_statuses or 'CONFIRMED' in timeline_statuses: # CONFIRMED is usually the key for success
@@ -277,7 +277,7 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
         new_status_from_webhook = "unresolved"
         if 'UNDERPAID' in timeline_statuses: payment_transaction.status_message = "Underpaid"
         if 'OVERPAID' in timeline_statuses: payment_transaction.status_message = "Overpaid"
-
+    
     # Update crypto details if available from the webhook
     if charge_obj_from_webhook.payments:
         last_payment_event = charge_obj_from_webhook.payments[-1] # Get the most recent payment event
@@ -306,7 +306,7 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
         # Pass extracted metadata to the helper function
         # Ensure metadata from charge object is complete
         webhook_metadata = charge_obj_from_webhook.metadata
-
+        
         # Add payment_amount_usd to metadata if not already there (should be from charge creation)
         if 'payment_amount_usd' not in webhook_metadata:
             payment_amount_usd_str = charge_obj_from_webhook.pricing.get('local', {}).get('amount')
@@ -321,7 +321,7 @@ def handle_coinbase_commerce_webhook(db_session: Session, request_body_str: str,
             return {"status": "error", "message": "Payment processed, but post-payment actions failed."}, 200 # Acknowledge webhook
         else:
             return {"status": "success", "message": "Payment completed and processed successfully via webhook."}, 200
-
+    
     return {"status": "success", "message": f"Webhook event {event_type} processed, status set to {new_status_from_webhook}."}, 200
 
 
@@ -329,10 +329,10 @@ def get_user_payment_history(db_session: Session, user_id: int, page: int = 1, p
     payments_query = db_session.query(PaymentTransaction).filter(PaymentTransaction.user_id == user_id).order_by(desc(PaymentTransaction.created_at))
     total_payments = payments_query.count()
     payments = payments_query.offset((page - 1) * per_page).limit(per_page).all()
-    history = [{"id": p.id, "internal_reference": p.internal_reference, "date": p.created_at.isoformat(),
-                  "description": p.description or f"Transaction ID {p.id}", "amount_crypto": p.amount_crypto,
-                  "crypto_currency": p.crypto_currency, "usd_equivalent": p.usd_equivalent, "status": p.status,
-                  "status_message": p.status_message, "gateway": p.payment_gateway, "gateway_id": p.gateway_transaction_id,
+    history = [{"id": p.id, "internal_reference": p.internal_reference, "date": p.created_at.isoformat(), 
+                  "description": p.description or f"Transaction ID {p.id}", "amount_crypto": p.amount_crypto, 
+                  "crypto_currency": p.crypto_currency, "usd_equivalent": p.usd_equivalent, "status": p.status, 
+                  "status_message": p.status_message, "gateway": p.payment_gateway, "gateway_id": p.gateway_transaction_id, 
                   "subscription_id": p.user_strategy_subscription_id} for p in payments]
     return {"status": "success", "payment_history": history, "total": total_payments, "page": page, "per_page": per_page, "total_pages": (total_payments + per_page - 1) // per_page if per_page > 0 else 0}
 
@@ -344,10 +344,10 @@ def list_all_payment_transactions(db_session: Session, page: int = 1, per_page: 
     if gateway: query = query.filter(PaymentTransaction.payment_gateway == gateway)
     total_transactions = query.count()
     transactions = query.order_by(desc(PaymentTransaction.created_at)).offset((page - 1) * per_page).limit(per_page).all()
-    transaction_list = [{"id": t.id, "internal_reference": t.internal_reference, "user_id": t.user_id,
-                           "date": t.created_at.isoformat(), "description": t.description, "amount_crypto": t.amount_crypto,
-                           "crypto_currency": t.crypto_currency, "usd_equivalent": t.usd_equivalent, "status": t.status,
-                           "status_message": t.status_message, "gateway": t.payment_gateway, "gateway_id": t.gateway_transaction_id,
+    transaction_list = [{"id": t.id, "internal_reference": t.internal_reference, "user_id": t.user_id, 
+                           "date": t.created_at.isoformat(), "description": t.description, "amount_crypto": t.amount_crypto, 
+                           "crypto_currency": t.crypto_currency, "usd_equivalent": t.usd_equivalent, "status": t.status, 
+                           "status_message": t.status_message, "gateway": t.payment_gateway, "gateway_id": t.gateway_transaction_id, 
                            "subscription_id": t.user_strategy_subscription_id} for t in transactions]
     return {"status": "success", "transactions": transaction_list, "total": total_transactions, "page": page, "per_page": per_page, "total_pages": (total_transactions + per_page - 1) // per_page if per_page > 0 else 0}
 
@@ -356,11 +356,11 @@ def get_payment_transaction_by_id(db_session: Session, transaction_id: int):
     if not transaction: return {"status": "error", "message": "Payment transaction not found."}
     return {"status": "success", "transaction": {
             "id": transaction.id, "internal_reference": transaction.internal_reference, "user_id": transaction.user_id,
-            "date": transaction.created_at.isoformat(), "description": transaction.description,
-            "amount_crypto": transaction.amount_crypto, "crypto_currency": transaction.crypto_currency,
-            "usd_equivalent": transaction.usd_equivalent, "status": transaction.status,
-            "status_message": transaction.status_message, "gateway": transaction.payment_gateway,
-            "gateway_id": transaction.gateway_transaction_id, "subscription_id": transaction.user_strategy_subscription_id,
+            "date": transaction.created_at.isoformat(), "description": transaction.description, 
+            "amount_crypto": transaction.amount_crypto, "crypto_currency": transaction.crypto_currency, 
+            "usd_equivalent": transaction.usd_equivalent, "status": transaction.status, 
+            "status_message": transaction.status_message, "gateway": transaction.payment_gateway, 
+            "gateway_id": transaction.gateway_transaction_id, "subscription_id": transaction.user_strategy_subscription_id, 
             "updated_at": transaction.updated_at.isoformat()
         }}
 
@@ -384,7 +384,7 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
     processed_successfully = True
     if update_request.new_status == 'completed' and old_status != 'completed':
         logger.info(f"Transaction {transaction_id} marked as 'completed' by admin. Attempting post-payment processing.")
-
+        
         reconstructed_metadata = {}
         try:
             # Attempt to reconstruct metadata. This is highly dependent on how it was stored.
@@ -392,7 +392,7 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
             # Fallback: parse from transaction.description
             if transaction.description:
                 # This is a basic attempt; real parsing might be more complex
-                desc_metadata_prefix = "Metadata: {"
+                desc_metadata_prefix = "Metadata: {" 
                 if desc_metadata_prefix in transaction.description:
                     metadata_json_str = transaction.description[transaction.description.find(desc_metadata_prefix) + len(desc_metadata_prefix)-1:]
                     # Ensure closing brace is found and extract
@@ -414,7 +414,7 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
                         logger.warning(f"Could not find complete metadata JSON in description for TxID {transaction.id}. Using default/fallback values if possible.")
                 else:
                      logger.warning(f"Metadata marker not found in description for TxID {transaction.id}")
-
+            
             # Ensure essential fields for _process_successful_payment are present
             if 'user_id' not in reconstructed_metadata and transaction.user_id:
                 reconstructed_metadata['user_id'] = str(transaction.user_id)
@@ -436,7 +436,7 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
                 # transaction.status_message already updated by _process_successful_payment on failure
             else:
                 logger.info(f"Post-payment processing successful for manually completed transaction {transaction_id}.")
-
+        
     try:
         db_session.commit()
         message = "Payment status updated manually."

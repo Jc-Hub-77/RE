@@ -25,7 +25,7 @@
     --dm-surface-color: #1e1e1e; /* For cards, sidebars, modals */
     --dm-text-color: #e0e0e0;
     --dm-text-color-muted: #a0a0a0;
-    --dm-border-color: #333333;
+    --dm-border-color: #333333; 
 }
 
 * {
@@ -36,10 +36,10 @@
 
 body {
     font-family: var(--font-family);
-    background-color: var(--light-gray);
+    background-color: var(--light-gray); 
     color: var(--text-color);
     line-height: 1.6;
-    display: flex;
+    display: flex; 
     min-height: 100vh;
     transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out;
 }
@@ -262,15 +262,15 @@ tbody tr:hover {
 
 /* Modals (Basic Styling - can be enhanced) */
 .modal {
-    display: none;
-    position: fixed;
-    z-index: 1000;
+    display: none; 
+    position: fixed; 
+    z-index: 1000; 
     left: 0;
     top: 0;
-    width: 100%;
-    height: 100%;
-    overflow: auto;
-    background-color: rgba(0,0,0,0.5);
+    width: 100%; 
+    height: 100%; 
+    overflow: auto; 
+    background-color: rgba(0,0,0,0.5); 
 }
 .modal-content {
     background-color: #fff;
@@ -340,7 +340,7 @@ tbody tr:hover {
 }
 #priceChartContainer, #equityChartContainer {
     width: 100%;
-    height: 400px;
+    height: 400px; 
     margin-bottom: 20px;
     border: 1px solid var(--border-color);
 }
@@ -422,7 +422,7 @@ body.dark-mode .main-content {
 body.dark-mode header.page-header {
     border-bottom-color: var(--dm-border-color);
 }
-body.dark-mode header.page-header h1,
+body.dark-mode header.page-header h1, 
 body.dark-mode header.page-header h2 {
     color: var(--dm-text-color);
 }
@@ -453,12 +453,12 @@ body.dark-mode textarea {
     color: var(--dm-text-color);
     border-color: var(--dm-border-color);
 }
-body.dark-mode input::placeholder,
+body.dark-mode input::placeholder, 
 body.dark-mode textarea::placeholder {
     color: var(--dm-text-color-muted);
 }
-body.dark-mode input:focus,
-body.dark-mode select:focus,
+body.dark-mode input:focus, 
+body.dark-mode select:focus, 
 body.dark-mode textarea:focus {
     border-color: var(--dm-primary-color);
     box-shadow: 0 0 0 0.2rem rgba(var(--dm-primary-color-rgb),.25); /* Use defined RGB for new --dm-primary-color */
@@ -488,7 +488,7 @@ body.dark-mode th, body.dark-mode td {
     /* vertical-align is already set globally for td, th */
 }
 body.dark-mode th {
-    background-color: #2d3748;
+    background-color: #2d3748; 
     color: var(--dm-text-color);
 }
 body.dark-mode tbody tr:nth-child(even) {
@@ -517,11 +517,11 @@ body.dark-mode .close-btn {
 }
 body.dark-mode .close-btn:hover, body.dark-mode .close-btn:focus { color: var(--dm-text-color); }
 
-body.dark-mode .metric-item {
+body.dark-mode .metric-item { 
     background-color: var(--dm-background-color); /* Match main dark bg or slightly lighter */
-    border-color: var(--dm-border-color);
+    border-color: var(--dm-border-color); 
 }
-body.dark-mode .metric-item strong {
+body.dark-mode .metric-item strong { 
     color: var(--dm-text-color-muted);
 }
 
@@ -544,7 +544,7 @@ body.dark-mode .auth-page footer {
 }
 
 /* Dark mode for chart placeholders if needed */
-body.dark-mode #priceChartContainer,
+body.dark-mode #priceChartContainer, 
 body.dark-mode #equityChartContainer {
     border-color: var(--dm-border-color);
     /* Chart libraries usually have their own theme options for dark mode */
