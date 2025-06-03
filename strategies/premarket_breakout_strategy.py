@@ -6,7 +6,9 @@ import ccxt
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import time as time_module 
 import json 
-import asyncio # Added for async sleep
+# import asyncio # Removed asyncio
+from sqlalchemy.orm import Session # Added for type hinting if not already there from other strategies
+from backend.models import Position, Order, UserStrategySubscription # Added for type hinting
 
 from backend import strategy_utils 
 # from backend.models import Order, Position # For type hinting if needed by utils
@@ -29,6 +31,9 @@ class PreMarketBreakout:
             "market_open_time_est": {"type": "str", "label": "Market Open Time (EST HH:MM)", "default": "09:30"},
             "trading_session_end_time_est": {"type": "str", "label": "Trading Session End Time (EST HH:MM)", "default": "15:55"}, 
             "est_timezone": {"type": "str", "label": "EST Timezone Name", "default": "US/Eastern", "choices": ["US/Eastern", "America/New_York"]},
+            # New parameters for order fill
+            "order_fill_max_retries": {"type": "int", "default": 10, "min": 1, "max": 30, "label": "Order Fill Max Retries"},
+            "order_fill_delay_seconds": {"type": "int", "default": 2, "min": 1, "max": 10, "label": "Order Fill Delay (s)"},
         }
 
     def __init__(self, db_session, user_sub_obj, strategy_params: dict, exchange_ccxt, logger=None):
@@ -67,6 +72,10 @@ class PreMarketBreakout:
         self.current_pos_entry_price, self.current_pos_qty = Decimal("0"), Decimal("0")
         self.sl_order_db_id, self.tp_order_db_id = None, None
         self.active_sl_exchange_id, self.active_tp_exchange_id = None, None
+        
+        # Initialize order fill parameters
+        self.order_fill_max_retries = int(self.params.get("order_fill_max_retries", 10)) # Defaulting here if not in params
+        self.order_fill_delay_seconds = int(self.params.get("order_fill_delay_seconds", 2)) # Defaulting here if not in params
 
         self.quantity_precision, self.price_precision = None, None
         self._fetch_market_precision()
@@ -77,9 +86,83 @@ class PreMarketBreakout:
         except Exception as e: self.logger.error(f"Failed to set leverage: {e}")
         self.logger.info(f"{self.name} initialized for UserSubID {self.user_sub_obj.id if self.user_sub_obj else 'N/A'}")
 
-    async def _await_order_fill(self, exchange_order_id: str, max_retries=10, retry_delay_sec=2):
-        self.logger.info(f"Awaiting fill for order ID: {exchange_order_id}")
-        for attempt in range(max_retries):
+    @classmethod
+    def validate_parameters(cls, params: dict) -> dict:
+        """Validates strategy-specific parameters."""
+        definition = cls.get_parameters_definition()
+        validated_params = {}
+        _logger = logging.getLogger(__name__) # Use a logger instance
+
+        for key, def_value in definition.items():
+            val_type_str = def_value.get("type")
+            choices = def_value.get("choices")
+            min_val = def_value.get("min")
+            max_val = def_value.get("max")
+            default_val = def_value.get("default")
+
+            user_val = params.get(key)
+
+            if user_val is None: # Parameter not provided by user
+                if default_val is not None:
+                    user_val = default_val # Apply default
+                else:
+                    raise ValueError(f"Required parameter '{key}' is missing and has no default.")
+            
+            # Type checking and coercion
+            if val_type_str == "int":
+                try:
+                    user_val = int(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be an integer. Got: {user_val}")
+            elif val_type_str == "float":
+                try:
+                    user_val = float(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be a float. Got: {user_val}")
+            elif val_type_str == "str": 
+                if not isinstance(user_val, str):
+                    raise ValueError(f"Parameter '{key}' must be a string. Got: {user_val}")
+                
+                if key == "est_timezone": # Specific validation for timezone string
+                    try:
+                        pytz.timezone(user_val)
+                    except pytz.exceptions.UnknownTimeZoneError:
+                        raise ValueError(f"Invalid timezone string for '{key}': {user_val}")
+                elif key.endswith("_time_est"): # Specific validation for HH:MM time strings
+                    try:
+                        datetime.strptime(user_val, '%H:%M')
+                    except ValueError:
+                        raise ValueError(f"Parameter '{key}' must be in HH:MM format. Got: {user_val}")
+
+            elif val_type_str == "bool": # Not in current definition but good to have
+                if not isinstance(user_val, bool):
+                    if str(user_val).lower() in ['true', 'yes', '1']: user_val = True
+                    elif str(user_val).lower() in ['false', 'no', '0']: user_val = False
+                    else: raise ValueError(f"Parameter '{key}' must be a boolean. Got: {user_val}")
+            
+            # Choice validation
+            if choices and user_val not in choices:
+                raise ValueError(f"Parameter '{key}' value '{user_val}' is not in valid choices: {choices}")
+            
+            # Min/Max validation
+            if val_type_str in ["int", "float"]:
+                if min_val is not None and user_val < min_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is less than min {min_val}.")
+                if max_val is not None and user_val > max_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is greater than max {max_val}.")
+            
+            validated_params[key] = user_val
+
+        # Check for unknown parameters
+        for key_param in params:
+            if key_param not in definition:
+                _logger.warning(f"Unknown parameter '{key_param}' provided for {cls.__name__}. It will be ignored.")
+        
+        return validated_params
+
+    def _monitor_order_fill_sync(self, exchange_order_id: str): # Uses instance vars for retries/delay
+        self.logger.info(f"Monitoring fill for order ID: {exchange_order_id} (retries: {self.order_fill_max_retries}, delay: {self.order_fill_delay_seconds}s)")
+        for attempt in range(self.order_fill_max_retries):
             try:
                 order_status = self.exchange_ccxt.fetch_order(exchange_order_id, self.trading_pair)
                 if order_status['status'] == 'closed':
@@ -87,17 +170,21 @@ class PreMarketBreakout:
                     return order_status
                 elif order_status['status'] in ['canceled', 'rejected', 'expired']:
                     self.logger.warning(f"Order {exchange_order_id} terminal but not filled: {order_status['status']}")
-                    return None
-                self.logger.info(f"Order {exchange_order_id} status: {order_status['status']}. Attempt {attempt+1}/{max_retries}.")
+                    return order_status # Return the terminal status
+                self.logger.info(f"Order {exchange_order_id} status: {order_status['status']}. Attempt {attempt+1}/{self.order_fill_max_retries}.")
             except ccxt.OrderNotFound:
                 self.logger.warning(f"Order {exchange_order_id} not found (attempt {attempt+1}).")
             except Exception as e:
                 self.logger.error(f"Error fetching order {exchange_order_id}: {e}", exc_info=True)
-            await asyncio.sleep(retry_delay_sec)
-        self.logger.warning(f"Order {exchange_order_id} did not fill after {max_retries} retries.")
+            time_module.sleep(self.order_fill_delay_seconds) 
+        self.logger.warning(f"Order {exchange_order_id} did not fill after {self.order_fill_max_retries} retries. Returning last known status or None.")
+        try: # Final attempt to get status
+            return self.exchange_ccxt.fetch_order(exchange_order_id, self.trading_pair)
+        except Exception as e:
+            self.logger.error(f"Final check for order {exchange_order_id} failed: {e}", exc_info=True)
         return None
 
-    async def _place_order_with_sl_tp(self, side, quantity_decimal: Decimal, entry_price_decimal: Decimal, sl_price_decimal: Decimal, tp_price_decimal: Decimal, current_simulated_time_utc=None):
+    def _place_order_with_sl_tp(self, side, quantity_decimal: Decimal, entry_price_decimal: Decimal, sl_price_decimal: Decimal, tp_price_decimal: Decimal, current_simulated_time_utc=None): # Made sync
         formatted_qty_float = float(self._format_quantity(quantity_decimal))
         sl_price_str = str(self._format_price(sl_price_decimal))
         tp_price_str = str(self._format_price(tp_price_decimal))
@@ -118,7 +205,7 @@ class PreMarketBreakout:
         exchange_market_order_id = None
         
         try:
-            await self._cancel_all_open_orders() # Use await
+            self._cancel_all_open_orders(current_simulated_time_utc=current_simulated_time_utc) # Made sync, pass param
 
             db_market_order = strategy_utils.create_strategy_order_in_db(
                 self.db_session, self.user_sub_obj.id, self.trading_pair, 'MARKET', side, formatted_qty_float, entry_price_float, 'pending_exchange_creation'
@@ -130,7 +217,7 @@ class PreMarketBreakout:
             self.logger.info(f"Market order submitted. ID: {exchange_market_order_id}, Receipt: {market_order_receipt}")
             strategy_utils.update_strategy_order_in_db(self.db_session, db_market_order.id, updates={'order_id': exchange_market_order_id, 'status': 'submitted_to_exchange', 'raw_order_data': json.dumps(market_order_receipt)})
 
-            filled_order_details = await self._await_order_fill(exchange_market_order_id)
+            filled_order_details = self._monitor_order_fill_sync(exchange_market_order_id) # Changed call
             if not filled_order_details or filled_order_details.get('status') != 'closed':
                 strategy_utils.update_strategy_order_in_db(self.db_session, db_market_order.id, updates={'status': 'fill_check_failed', 'status_message': 'Order fill timeout or failure.'})
                 return {"status": "error", "message": "Market order fill confirmation failed.", **action_details}
@@ -183,12 +270,7 @@ class PreMarketBreakout:
                 strategy_utils.update_strategy_order_in_db(self.db_session, db_market_order.id, updates={'status': 'error_before_fill', 'status_message': str(e)})
             return {"status": "error", "message": str(e), **action_details}
 
-    async def _close_position(self, current_side, current_qty_decimal: Decimal, current_price_for_closing_decimal: Decimal, reason="signal", current_simulated_time_utc=None):
-        # ... (rest of the methods, ensure they are async if they call async methods)
-        # For brevity, I will assume other methods are correctly defined or will be refactored later if they also become async.
-        # The provided diff will focus on _place_order_with_sl_tp and necessary adjustments in __init__ and _await_order_fill.
-        # The following is a placeholder to ensure the file structure is maintained.
-        # Actual implementation of _close_position would also need to be async and use await for _await_order_fill and _cancel_all_open_orders.
+    def _close_position(self, current_side, current_qty_decimal: Decimal, current_price_for_closing_decimal: Decimal, reason="signal", current_simulated_time_utc=None): # Made sync
         formatted_qty = self._format_quantity(current_qty_decimal)
         action_details = {
             "action": "CLOSE_POSITION", "side_closed": current_side, "symbol": self.trading_pair,
@@ -205,7 +287,7 @@ class PreMarketBreakout:
 
         db_close_order = None
         try:
-            await self._cancel_all_open_orders() 
+            self._cancel_all_open_orders(current_simulated_time_utc=current_simulated_time_utc) # Made sync
             ccxt_side = 'sell' if current_side == 'long' else 'buy'
             db_close_order = strategy_utils.create_strategy_order_in_db(self.db_session, self.user_sub_obj.id, self.trading_pair, 'MARKET_CLOSE', ccxt_side, float(formatted_qty), float(current_price_for_closing_decimal), 'pending_exchange_creation', notes=f"Close for pos {self.active_position_db_id}, reason: {reason}")
             if not db_close_order: raise Exception("DB close order creation failed.")
@@ -215,7 +297,7 @@ class PreMarketBreakout:
             self.logger.info(f"Close order submitted. ID: {exchange_close_order_id}")
             strategy_utils.update_strategy_order_in_db(self.db_session, db_close_order.id, updates={'order_id': exchange_close_order_id, 'status': 'submitted_to_exchange', 'raw_order_data': json.dumps(close_order_receipt)})
             
-            filled_close_details = await self._await_order_fill(exchange_close_order_id)
+            filled_close_details = self._monitor_order_fill_sync(exchange_close_order_id) # Changed call
             final_close_price = current_price_for_closing_decimal
             if filled_close_details and filled_close_details.get('status') == 'closed':
                 final_close_price = Decimal(str(filled_close_details.get('average', current_price_for_closing_decimal)))
@@ -236,7 +318,7 @@ class PreMarketBreakout:
             if db_close_order and db_close_order.id: strategy_utils.update_strategy_order_in_db(self.db_session, db_close_order.id, updates={'status': 'error', 'status_message': str(e)})
             return {"status": "error", "message": str(e), **action_details}
 
-    async def _cancel_all_open_orders(self, current_simulated_time_utc=None): # Made async
+    def _cancel_all_open_orders(self, current_simulated_time_utc=None): # Made sync
         if current_simulated_time_utc: 
             self.logger.info(f"[BACKTEST] Simulating cancel all open orders for {self.trading_pair}")
             return {"status": "simulated_cancel_all"}
@@ -250,28 +332,28 @@ class PreMarketBreakout:
             self.logger.error(f"Error cancelling orders: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _eod_close_logic(self, current_est_datetime, current_price_for_closing_decimal: Decimal, current_simulated_time_utc=None): # Made async
+    def _eod_close_logic(self, current_est_datetime, current_price_for_closing_decimal: Decimal, current_simulated_time_utc=None): # Made sync
         self.logger.info(f"EOD check at {current_est_datetime.strftime('%Y-%m-%d %H:%M:%S')} EST")
         self._get_current_position_details(historical_data_feed=current_simulated_time_utc is not None) 
         if self.active_position_side is not None: 
             self.logger.info(f"EOD: Open position (Side: {self.active_position_side}). Closing.")
-            await self._close_position(self.active_position_side, self.current_pos_qty, current_price_for_closing_decimal, "EOD", current_simulated_time_utc) # await
-        await self._cancel_all_open_orders(current_simulated_time_utc=current_simulated_time_utc) # await
+            self._close_position(self.active_position_side, self.current_pos_qty, current_price_for_closing_decimal, "EOD", current_simulated_time_utc) # Removed await
+        self._cancel_all_open_orders(current_simulated_time_utc=current_simulated_time_utc) # Removed await
         self._reset_daily_state() 
         return {"action": "EOD_CLOSE_RESET"}
 
-    async def execute_live_signal(self, market_data_df=None): # Made async
+    def execute_live_signal(self, market_data_df=None): # Made sync
         now_est = self._get_current_est_datetime()
         now_est_time = now_est.time()
         if now_est_time >= self.market_open_time and (self.initialized_for_session_date is None or self.initialized_for_session_date != now_est.date()):
             if not self._initialize_session_levels(now_est): return {"action": "HOLD", "reason": "Failed level initialization"}
         if not self.premarket_high or not self.premarket_low: 
             if now_est_time < self.market_open_time and now_est_time >= self.pre_market_start_time: self.logger.info(f"Pre-market period. Levels not yet finalized.")
-            elif now_est_time >= self.market_open_time: self.logger.warning(f"Market open but levels not set."); await self._initialize_session_levels(now_est) # Added await
+            elif now_est_time >= self.market_open_time: self.logger.warning(f"Market open but levels not set."); self._initialize_session_levels(now_est) # Removed await
             else: self.logger.info(f"Outside trading session hours.")
             return {"action": "HOLD", "reason": "Levels not set or outside trading hours"}
         if now_est_time >= self.trading_session_end_time:
-            try: eod_close_price = Decimal(str(self.exchange_ccxt.fetch_ticker(self.trading_pair)['last'])); return await self._eod_close_logic(now_est, eod_close_price) # Added await
+            try: eod_close_price = Decimal(str(self.exchange_ccxt.fetch_ticker(self.trading_pair)['last'])); return self._eod_close_logic(now_est, eod_close_price) # Removed await
             except Exception as e: self.logger.error(f"Failed EOD price fetch: {e}"); return {"action": "ERROR", "reason": "Failed EOD price fetch"}
         try:
             ohlcv_breakout = self.exchange_ccxt.fetch_ohlcv(self.trading_pair, timeframe=self.kline_interval_for_breakout, limit=2)
@@ -286,16 +368,16 @@ class PreMarketBreakout:
             if entry_price > self.premarket_high and entry_price <= self.max_deviation_high_entry:
                 self.logger.info(f"LONG Breakout: {entry_price} > {self.premarket_high}")
                 sl = entry_price * (Decimal("1") - self.stop_loss_percent); tp = entry_price * (Decimal("1") + self.take_profit_percent)
-                if self.target_notional_usdt_for_trade > 0 and entry_price > 0: quantity = self.target_notional_usdt_for_trade / entry_price; trade_result = await self._place_order_with_sl_tp('long', quantity, entry_price, sl, tp); action_taken_this_cycle = True
+            if self.target_notional_usdt_for_trade > 0 and entry_price > 0: quantity = self.target_notional_usdt_for_trade / entry_price; trade_result = self._place_order_with_sl_tp('long', quantity, entry_price, sl, tp); action_taken_this_cycle = True # Removed await
             elif entry_price < self.premarket_low and entry_price >= self.max_deviation_low_entry:
                 self.logger.info(f"SHORT Breakout: {entry_price} < {self.premarket_low}")
                 sl = entry_price * (Decimal("1") + self.stop_loss_percent); tp = entry_price * (Decimal("1") - self.take_profit_percent)
-                if self.target_notional_usdt_for_trade > 0 and entry_price > 0: quantity = self.target_notional_usdt_for_trade / entry_price; trade_result = await self._place_order_with_sl_tp('short', quantity, entry_price, sl, tp); action_taken_this_cycle = True
+                if self.target_notional_usdt_for_trade > 0 and entry_price > 0: quantity = self.target_notional_usdt_for_trade / entry_price; trade_result = self._place_order_with_sl_tp('short', quantity, entry_price, sl, tp); action_taken_this_cycle = True # Removed await
         else: self.logger.info(f"Position open ({self.active_position_side}). Monitoring.")
         if action_taken_this_cycle: self.last_trade_candle_timestamp = last_closed_candle_timestamp_ms; return trade_result if trade_result else {"action": "ERROR", "reason": "Trade placement failed"}
         return {"action": "HOLD", "reason": "No signal or position exists"}
 
-    async def run_backtest(self, historical_data_feed, current_simulated_time_utc: datetime): # Made async
+    def run_backtest(self, historical_data_feed, current_simulated_time_utc: datetime): # Made sync
         now_est = self._get_current_est_datetime(current_simulated_time_utc)
         now_est_time = now_est.time()
         current_price_for_eval_decimal = Decimal(str(historical_data_feed.get_current_price(self.trading_pair, current_simulated_time_utc)))
@@ -303,13 +385,13 @@ class PreMarketBreakout:
             if not self._initialize_session_levels(now_est, historical_data_feed): return {"action": "HOLD", "reason": "Backtest: Failed level initialization"}
         if not self.premarket_high or not self.premarket_low:
             if now_est_time < self.market_open_time and now_est_time >= self.pre_market_start_time: self.logger.info(f"[BT] Pre-market. Levels not final.")
-            elif now_est_time >= self.market_open_time: self.logger.warning(f"[BT] Market open, levels not set."); await self._initialize_session_levels(now_est, historical_data_feed) # Added await
+            elif now_est_time >= self.market_open_time: self.logger.warning(f"[BT] Market open, levels not set."); self._initialize_session_levels(now_est, historical_data_feed) # Removed await
             else: self.logger.info(f"[BT] Outside trading hours.")
             return {"action": "HOLD", "reason": "Backtest: Levels not set/outside hours"}
-        if now_est_time >= self.trading_session_end_time: return await self._eod_close_logic(now_est, current_price_for_eval_decimal, current_simulated_time_utc) # Added await
+        if now_est_time >= self.trading_session_end_time: return self._eod_close_logic(now_est, current_price_for_eval_decimal, current_simulated_time_utc) # Removed await
         try:
             interval_sec = self.exchange_ccxt.parse_timeframe(self.kline_interval_for_breakout)
-            since_utc_ms = int((current_simulated_time_utc - timedelta(minutes=self.exchange_ccxt.parse_timeframe(self.kline_interval_for_breakout)*5/60)).timestamp()*1000)
+            since_utc_ms = int((current_simulated_time_utc - timedelta(minutes=self.exchange_ccxt.parse_timeframe(self.kline_interval_for_breakout)*5/60)).timestamp()*1000) # type: ignore
             ohlcv = historical_data_feed.get_ohlcv(self.trading_pair, self.kline_interval_for_breakout, since_utc_ms, 10, int(current_simulated_time_utc.timestamp()*1000))
             if not ohlcv: return {"action": "HOLD", "reason": "Backtest: No kline data"}
             target_ts_ms = int((current_simulated_time_utc - timedelta(seconds=interval_sec)).timestamp()*1000)
@@ -324,9 +406,9 @@ class PreMarketBreakout:
             entry = close
             if entry > self.premarket_high and entry <= self.max_deviation_high_entry:
                 sl = entry*(1-self.stop_loss_percent); tp = entry*(1+self.take_profit_percent)
-                if self.target_notional_usdt_for_trade > 0 and entry > 0: qty = self.target_notional_usdt_for_trade/entry; trade_action = await self._place_order_with_sl_tp('long',qty,entry,sl,tp,current_simulated_time_utc); action_taken=True # Added await
+            if self.target_notional_usdt_for_trade > 0 and entry_price > 0: qty = self.target_notional_usdt_for_trade/entry; trade_action = self._place_order_with_sl_tp('long',qty,entry,sl,tp,current_simulated_time_utc); action_taken=True # Removed await
             elif entry < self.premarket_low and entry >= self.max_deviation_low_entry:
                 sl = entry*(1+self.stop_loss_percent); tp = entry*(1-self.take_profit_percent)
-                if self.target_notional_usdt_for_trade > 0 and entry > 0: qty = self.target_notional_usdt_for_trade/entry; trade_action = await self._place_order_with_sl_tp('short',qty,entry,sl,tp,current_simulated_time_utc); action_taken=True # Added await
+                if self.target_notional_usdt_for_trade > 0 and entry > 0: qty = self.target_notional_usdt_for_trade/entry; trade_action = self._place_order_with_sl_tp('short',qty,entry,sl,tp,current_simulated_time_utc); action_taken=True # Removed await
         if action_taken: self.last_trade_candle_timestamp = ts_ms
         return trade_action

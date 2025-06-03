@@ -19,17 +19,45 @@ class EMACrossoverStrategy:
                  risk_per_trade_percent: float = 1.0,
                  stop_loss_percent: float = 2.0, 
                  take_profit_percent: float = 4.0,
+                 # New parameters added to signature
+                 order_fill_timeout_seconds: int = 60,
+                 order_fill_check_interval_seconds: int = 3,
                  **custom_parameters
                  ):
         self.symbol = symbol
         self.timeframe = timeframe
-        self.short_ema_period = int(short_ema_period)
-        self.long_ema_period = int(long_ema_period)
         
-        self.risk_per_trade_decimal = float(risk_per_trade_percent) / 100.0
-        self.stop_loss_decimal = float(stop_loss_percent) / 100.0
-        self.take_profit_decimal = float(take_profit_percent) / 100.0
+        # Process parameters defined in get_parameters_definition first
+        # This allows overrides from custom_parameters if they happen to be passed there too
+        # though ideally they are passed as named args if modified from default.
+        defined_params = self.get_parameters_definition()
+        params_to_set = {}
+        for p_name, p_def in defined_params.items():
+            # Prioritize named args, then custom_parameters, then default from definition
+            if p_name == "short_ema_period": params_to_set[p_name] = short_ema_period
+            elif p_name == "long_ema_period": params_to_set[p_name] = long_ema_period
+            elif p_name == "risk_per_trade_percent": params_to_set[p_name] = risk_per_trade_percent
+            elif p_name == "stop_loss_percent": params_to_set[p_name] = stop_loss_percent
+            elif p_name == "take_profit_percent": params_to_set[p_name] = take_profit_percent
+            # For newly added params, ensure they are picked up correctly
+            elif p_name == "order_fill_timeout_seconds": 
+                params_to_set[p_name] = custom_parameters.get(p_name, order_fill_timeout_seconds)
+            elif p_name == "order_fill_check_interval_seconds":
+                params_to_set[p_name] = custom_parameters.get(p_name, order_fill_check_interval_seconds)
+            else: # Fallback for any other defined params if not explicitly handled above
+                 params_to_set[p_name] = custom_parameters.get(p_name, p_def['default'])
+
+
+        self.short_ema_period = int(params_to_set["short_ema_period"])
+        self.long_ema_period = int(params_to_set["long_ema_period"])
         
+        self.risk_per_trade_decimal = float(params_to_set["risk_per_trade_percent"]) / 100.0
+        self.stop_loss_decimal = float(params_to_set["stop_loss_percent"]) / 100.0
+        self.take_profit_decimal = float(params_to_set["take_profit_percent"]) / 100.0
+        
+        self.order_fill_timeout_seconds = int(params_to_set["order_fill_timeout_seconds"])
+        self.order_fill_check_interval_seconds = int(params_to_set["order_fill_check_interval_seconds"])
+
         self.name = f"EMA Crossover ({self.short_ema_period}/{self.long_ema_period})"
         self.description = f"A simple EMA crossover strategy using {self.short_ema_period}-period and {self.long_ema_period}-period EMAs."
         
@@ -94,6 +122,82 @@ class EMACrossoverStrategy:
             self.logger.info(f"[{self.name}-{self.symbol}] No active persistent position found in DB for this subscription.")
 
     @classmethod
+    def validate_parameters(cls, params: dict) -> dict:
+        """Validates strategy-specific parameters."""
+        definition = cls.get_parameters_definition()
+        validated_params = {}
+        # cls.logger is not available in classmethod directly without passing or using a global/module logger
+        # For simplicity, direct print or raise error. Or use logging.getLogger inside.
+        _logger = logging.getLogger(__name__)
+
+
+        for key, def_value in definition.items():
+            val_type_str = def_value.get("type")
+            choices = def_value.get("options") 
+            min_val = def_value.get("min")
+            max_val = def_value.get("max")
+            default_val = def_value.get("default")
+            
+            user_val = params.get(key)
+
+            if user_val is None: # Parameter not provided by user
+                if default_val is not None:
+                    user_val = default_val # Apply default
+                else:
+                    # If truly required and no default, this is an issue.
+                    raise ValueError(f"Required parameter '{key}' is missing and has no default.")
+            
+            # Type checking and coercion
+            if val_type_str == "int":
+                try:
+                    user_val = int(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be an integer. Got: {user_val}")
+            elif val_type_str == "float":
+                try:
+                    user_val = float(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be a float. Got: {user_val}")
+            elif val_type_str == "string": # Assuming "timeframe" type is string-like
+                if not isinstance(user_val, str):
+                    raise ValueError(f"Parameter '{key}' must be a string. Got: {user_val}")
+            elif val_type_str == "bool":
+                if not isinstance(user_val, bool):
+                    if str(user_val).lower() in ['true', 'yes', '1']: user_val = True
+                    elif str(user_val).lower() in ['false', 'no', '0']: user_val = False
+                    else: raise ValueError(f"Parameter '{key}' must be a boolean. Got: {user_val}")
+            
+            # Choice validation
+            if choices and user_val not in choices:
+                raise ValueError(f"Parameter '{key}' value '{user_val}' is not in valid choices: {choices}")
+            
+            # Min/Max validation
+            if val_type_str in ["int", "float"]:
+                if min_val is not None and user_val < min_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is less than min {min_val}.")
+                if max_val is not None and user_val > max_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is greater than max {max_val}.")
+            
+            validated_params[key] = user_val
+
+        # Check for unknown parameters specifically passed in `params`
+        for key_param in params:
+            if key_param not in definition:
+                # These are parameters that were in the input `params` but not defined in get_parameters_definition.
+                # This strategy's __init__ takes symbol, timeframe, capital as named args, and **custom_parameters.
+                # If this validator is for the **custom_parameters part, then any unknown key is an error.
+                # If it's for a combined dict, then we might allow symbol/timeframe/capital.
+                # Assuming this validates the content of UserStrategySubscription.custom_parameters.
+                _logger.warning(f"Parameter '{key_param}' was provided but is not defined in EMA Crossover strategy. It will be ignored if not an explicit __init__ argument.")
+                # To be strict and only allow defined params:
+                # raise ValueError(f"Unknown parameter '{key_param}' provided for EMA Crossover strategy.")
+                # If you want to pass them through (e.g. if they are handled by __init__ explicitly):
+                # validated_params[key_param] = params[key_param]
+
+
+        return validated_params
+
+    @classmethod
     def get_parameters_definition(cls):
         return {
             "short_ema_period": {"type": "int", "default": 10, "min": 2, "max": 100, "label": "Short EMA Period"},
@@ -101,6 +205,9 @@ class EMACrossoverStrategy:
             "risk_per_trade_percent": {"type": "float", "default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1, "label": "Risk per Trade (% of Effective Capital)"},
             "stop_loss_percent": {"type": "float", "default": 2.0, "min": 0.1, "step": 0.1, "label": "Stop Loss % from Entry"},
             "take_profit_percent": {"type": "float", "default": 4.0, "min": 0.1, "step": 0.1, "label": "Take Profit % from Entry"},
+            # New param definitions
+            "order_fill_timeout_seconds": {"type": "int", "default": 60, "min": 10, "max": 300, "label": "Order Fill Timeout (s)"},
+            "order_fill_check_interval_seconds": {"type": "int", "default": 3, "min": 1, "max": 30, "label": "Order Fill Check Interval (s)"},
         }
 
     def _get_precisions_live(self, exchange_ccxt):
@@ -123,10 +230,10 @@ class EMACrossoverStrategy:
         self._get_precisions_live(exchange_ccxt)
         return float(exchange_ccxt.amount_to_precision(self.symbol, quantity))
 
-    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str, timeout_seconds: int = 60, check_interval_seconds: int = 3):
+    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str): # Removed defaults
         start_time = time.time()
-        self.logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {timeout_seconds}s)")
-        while time.time() - start_time < timeout_seconds:
+        self.logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {self.order_fill_timeout_seconds}s)")
+        while time.time() - start_time < self.order_fill_timeout_seconds:
             try:
                 order = exchange_ccxt.fetch_order(order_id, symbol)
                 self.logger.debug(f"[{self.name}-{self.symbol}] Order {order_id} status: {order['status']}")
@@ -138,7 +245,7 @@ class EMACrossoverStrategy:
                     return order
             except ccxt.OrderNotFound: self.logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} not found. Retrying.")
             except Exception as e: self.logger.error(f"[{self.name}-{self.symbol}] Error fetching order {order_id}: {e}. Retrying.", exc_info=True)
-            time.sleep(check_interval_seconds)
+            time.sleep(self.order_fill_check_interval_seconds)
         self.logger.warning(f"[{self.name}-{self.symbol}] Timeout waiting for order {order_id} to fill. Final check.")
         try:
             final_order_status = exchange_ccxt.fetch_order(order_id, symbol)

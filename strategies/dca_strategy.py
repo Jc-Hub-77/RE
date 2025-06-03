@@ -33,7 +33,11 @@ class DCAStrategy:
             "stop_loss_percent": 5.0,
             "safety_order_deviation_percent": 1.0,
             "safety_order_scale_factor": 1.0, 
-            "max_safety_orders": 5
+            "max_safety_orders": 5,
+            # New parameters
+            "order_fill_timeout_seconds": 60,
+            "order_fill_check_interval_seconds": 3,
+            "min_asset_qty_for_closure": 0.000001
         }
         
         self_params = {**defaults, **custom_parameters}
@@ -42,6 +46,11 @@ class DCAStrategy:
 
         self.tp1_sell_multiplier = self.tp1_sell_percent / 100.0
         self.tp2_sell_multiplier = self.tp2_sell_percent / 100.0
+
+        # Initialize new parameters
+        self.order_fill_timeout_seconds = int(self_params.get("order_fill_timeout_seconds", 60))
+        self.order_fill_check_interval_seconds = int(self_params.get("order_fill_check_interval_seconds", 3))
+        self.min_asset_qty_for_closure = float(self_params.get("min_asset_qty_for_closure", 0.000001))
         
         self.price_precision = 8
         self.quantity_precision = 8
@@ -110,6 +119,99 @@ class DCAStrategy:
             # Default state already initialized in __init__
 
     @classmethod
+    def validate_parameters(cls, params: dict) -> dict:
+        """Validates strategy-specific parameters."""
+        definition = cls.get_parameters_definition()
+        validated_params = {}
+
+        # Check for unknown parameters first
+        for key in params:
+            if key not in definition:
+                # Allow 'symbol', 'timeframe', 'capital' as they might be passed by backtesting engine
+                # but are not part of user-configurable DCA specific params.
+                # However, the DCA strategy __init__ directly uses symbol, timeframe, capital.
+                # For custom_parameters specifically, these should not be present if they are fixed.
+                # This validation is for the `custom_parameters` part of strategy_params.
+                # For this DCA strategy, it's simpler if __init__ receives all params and validator checks all.
+                # Let's assume for now 'params' to validate are ONLY the ones in definition.
+                # If other params like 'symbol' are passed at a higher level, they are not part of this dict.
+                pass # Silently ignore extra params not in definition for now, or raise error if strictness needed.
+                # raise ValueError(f"Unknown parameter '{key}' provided for DCA strategy.")
+
+
+        for key, def_value in definition.items():
+            val_type_str = def_value.get("type")
+            choices = def_value.get("options") # "options" not "choices"
+            min_val = def_value.get("min")
+            max_val = def_value.get("max")
+            default_val = def_value.get("default")
+
+            user_val = params.get(key)
+
+            if user_val is None: # Parameter not provided by user
+                if default_val is not None:
+                    user_val = default_val # Apply default
+                else:
+                    # This case implies a required parameter without a default is missing.
+                    # Depending on design, could raise error or let it pass if __init__ handles it.
+                    # For now, let __init__ handle it if it's truly optional without default.
+                    # If it's always required, get_parameters_definition should not have it as optional.
+                    # Or, raise ValueError(f"Required parameter '{key}' is missing and has no default.")
+                    pass # Let it pass if not strictly required by definition to have a value here
+
+            if user_val is not None: # If value is present (either user-provided or default)
+                # Type checking and coercion
+                if val_type_str == "int":
+                    try:
+                        user_val = int(user_val)
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Parameter '{key}' must be an integer. Got: {user_val}")
+                elif val_type_str == "float":
+                    try:
+                        user_val = float(user_val)
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Parameter '{key}' must be a float. Got: {user_val}")
+                elif val_type_str == "string":
+                    if not isinstance(user_val, str):
+                        raise ValueError(f"Parameter '{key}' must be a string. Got: {user_val}")
+                elif val_type_str == "bool": # DCA strategy doesn't have bools in current def
+                    if not isinstance(user_val, bool):
+                        if str(user_val).lower() in ['true', 'yes', '1']: user_val = True
+                        elif str(user_val).lower() in ['false', 'no', '0']: user_val = False
+                        else: raise ValueError(f"Parameter '{key}' must be a boolean. Got: {user_val}")
+                
+                # Choice validation (DCA strategy doesn't have 'choices' in current def)
+                if choices and user_val not in choices:
+                    raise ValueError(f"Parameter '{key}' value '{user_val}' is not in valid choices: {choices}")
+                
+                # Min/Max validation
+                if val_type_str in ["int", "float"]:
+                    if min_val is not None and user_val < min_val:
+                        raise ValueError(f"Parameter '{key}' value {user_val} is less than min {min_val}.")
+                    if max_val is not None and user_val > max_val:
+                        raise ValueError(f"Parameter '{key}' value {user_val} is greater than max {max_val}.")
+            
+            validated_params[key] = user_val
+            
+        # Final check for any params passed in `params` that were not in `definition`
+        # This is important if we don't raise error for unknown params at the beginning.
+        for key_param in params:
+            if key_param not in definition:
+                # This is where you decide if extra parameters are truly an error.
+                # For DCA, if 'symbol', 'timeframe', 'capital' are passed in this dict, they are unexpected
+                # as they are explicit __init__ args.
+                # For now, let's assume they are handled by the calling context of validate_parameters.
+                # If validate_parameters is meant to receive ONLY custom_parameters, then this check is good.
+                # If it receives ALL params that __init__ would, then need to adjust.
+                # Given the task, this validator should work on the `custom_parameters` part.
+                cls.logger.warning(f"Parameter '{key_param}' was provided but is not in DCA strategy definition. It will be ignored by strategy logic if not an explicit __init__ arg.")
+                # To be stricter, one might add: validated_params[key_param] = params[key_param]
+                # or raise ValueError here. For now, it means they are just passed through if not defined.
+
+
+        return validated_params
+
+    @classmethod
     def get_parameters_definition(cls):
         return { # Parameters as defined previously
             "base_order_size_usdt": {"type": "float", "default": 10.0, "label": "Base Order Size (USDT)"},
@@ -122,7 +224,11 @@ class DCAStrategy:
             "stop_loss_percent": {"type": "float", "default": 5.0, "label": "Stop Loss (%)"},
             "safety_order_deviation_percent": {"type": "float", "default": 1.0, "label": "Safety Order Deviation (%)"},
             "safety_order_scale_factor": {"type": "float", "default": 1.0, "label": "Safety Order Scale Factor"},
-            "max_safety_orders": {"type": "int", "default": 5, "label": "Max Safety Orders"}
+            "max_safety_orders": {"type": "int", "default": 5, "label": "Max Safety Orders"},
+            # Definitions for new parameters
+            "order_fill_timeout_seconds": {"type": "int", "default": 60, "min":10, "max":300, "label": "Order Fill Timeout (s)"},
+            "order_fill_check_interval_seconds": {"type": "int", "default": 3, "min":1, "max":30, "label": "Order Fill Check Interval (s)"},
+            "min_asset_qty_for_closure": {"type": "float", "default": 0.000001, "min":0.0, "label": "Min Asset Qty for Closure Check (Base Asset)"}
         }
 
     def _get_precisions(self, exchange_ccxt):
@@ -145,11 +251,11 @@ class DCAStrategy:
         self._get_precisions(exchange_ccxt)
         return float(exchange_ccxt.amount_to_precision(self.symbol, quantity))
 
-    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str, timeout_seconds: int = 60, check_interval_seconds: int = 3):
-        # Same as provided
+    def _await_order_fill(self, exchange_ccxt, order_id: str, symbol: str): # Removed defaults, will use instance vars
+        # Same as provided, but uses instance vars for timeout/interval
         start_time = time.time()
-        self.logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {timeout_seconds}s)")
-        while time.time() - start_time < timeout_seconds:
+        self.logger.info(f"[{self.name}-{self.symbol}] Awaiting fill for order {order_id} (timeout: {self.order_fill_timeout_seconds}s)")
+        while time.time() - start_time < self.order_fill_timeout_seconds:
             try:
                 order = exchange_ccxt.fetch_order(order_id, symbol)
                 self.logger.debug(f"[{self.name}-{self.symbol}] Order {order_id} status: {order['status']}")
@@ -161,7 +267,7 @@ class DCAStrategy:
                     return order
             except ccxt.OrderNotFound: self.logger.warning(f"[{self.name}-{self.symbol}] Order {order_id} not found. Retrying.")
             except Exception as e: self.logger.error(f"[{self.name}-{self.symbol}] Error fetching order {order_id}: {e}. Retrying.", exc_info=True)
-            time.sleep(check_interval_seconds)
+            time.sleep(self.order_fill_check_interval_seconds)
         self.logger.warning(f"[{self.name}-{self.symbol}] Timeout waiting for order {order_id} to fill. Final check.")
         try:
             final_order_status = exchange_ccxt.fetch_order(order_id, symbol)
@@ -369,7 +475,8 @@ class DCAStrategy:
                                 elif i == 1: self.dca_state['current_stop_loss_price'] = self.dca_state['take_profit_prices'][0] # SL to TP1
                                 self.logger.info(f"[{self.name}-{self.symbol}] TP{i+1} hit. Adjusted SL to {self.dca_state['current_stop_loss_price']}")
                             
-                            if self.dca_state['current_position_size_asset'] <= self._format_quantity(0.000001, exchange_ccxt) or i == 2 : # Position fully closed by TP3 or negligible amount left
+                            # Use parameterized negligible amount for closure check
+                            if self.dca_state['current_position_size_asset'] <= self._format_quantity(self.min_asset_qty_for_closure, exchange_ccxt) or i == 2 : 
                                 self.logger.info(f"[{self.name}-{self.symbol}] Position fully closed by TP{i+1} or negligible amount left.")
                                 strategy_utils.close_strategy_position_in_db(self.db_session, self.active_position_db_id, filled_tp_order['average'], filled_tp_order['filled'], f"Closed by TP{i+1}")
                                 self.active_position_db_id = None; self.position_db = None

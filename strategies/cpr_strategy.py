@@ -47,6 +47,15 @@ class CPRStrategy:
         self.reduced_tp_percent_if_filter = Decimal(str(self.params.get("reduced_tp_percent_if_filter", "0.2"))) / Decimal("100")
         self.use_monthly_cpr_filter_entry = self.params.get("use_monthly_cpr_filter_entry", True)
 
+        # New parameters for minor hardcoded values
+        self.daily_rsi_period = int(self.params.get("daily_rsi_period", 14))
+        self.entry_window_start_hour_utc = int(self.params.get("entry_window_start_hour_utc", 0))
+        self.entry_window_start_minute_utc = int(self.params.get("entry_window_start_minute_utc", 0))
+        self.entry_window_duration_minutes = int(self.params.get("entry_window_duration_minutes", 10))
+        self.entry_cooldown_seconds = int(self.params.get("entry_cooldown_seconds", 300))
+        self.eod_close_hour_utc = int(self.params.get("eod_close_hour_utc", 23))
+        self.eod_close_minute_utc = int(self.params.get("eod_close_minute_utc", 55))
+
         # In-memory state for daily calculated data
         self.daily_cpr: Optional[tuple] = None 
         self.weekly_cpr: Optional[tuple] = None
@@ -84,6 +93,70 @@ class CPRStrategy:
         return {k:v for k,v in self.__dict__.items() if not k.startswith('_') and k not in ['daily_cpr', 'weekly_cpr', 'monthly_cpr', 'daily_indicators', 'db_session', 'user_sub_obj', 'exchange_ccxt', 'params']}
 
     @classmethod
+    def validate_parameters(cls, params: dict) -> dict:
+        """Validates strategy-specific parameters."""
+        definition = cls.get_parameters_definition()
+        validated_params = {}
+
+        for key, def_value in definition.items():
+            val_type_str = def_value.get("type")
+            choices = def_value.get("options") # Changed from "choices" to "options" to match definition
+            min_val = def_value.get("min")
+            max_val = def_value.get("max")
+            default_val = def_value.get("default")
+
+            if key not in params and default_val is not None:
+                params[key] = default_val # Apply default if not provided
+
+            if key not in params and default_val is None: # Required param missing
+                raise ValueError(f"Required parameter '{key}' is missing.")
+
+            user_val = params.get(key) # Get user value or default applied above
+
+            # Type checking and coercion
+            if val_type_str == "int":
+                try:
+                    user_val = int(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be an integer. Got: {user_val}")
+            elif val_type_str == "float":
+                try:
+                    user_val = float(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be a float. Got: {user_val}")
+            elif val_type_str == "string": # Handles "string" and "timeframe" (as it's string based)
+                if not isinstance(user_val, str):
+                    raise ValueError(f"Parameter '{key}' must be a string. Got: {user_val}")
+            elif val_type_str == "select": # Handles "select" type (which uses "options")
+                 if not isinstance(user_val, str): # Assuming select values are strings
+                    raise ValueError(f"Parameter '{key}' for select must be a string. Got: {user_val}")
+            elif val_type_str == "bool":
+                if not isinstance(user_val, bool):
+                    if str(user_val).lower() in ['true', 'yes', '1']: user_val = True
+                    elif str(user_val).lower() in ['false', 'no', '0']: user_val = False
+                    else: raise ValueError(f"Parameter '{key}' must be a boolean (true/false). Got: {user_val}")
+            
+            # Choice validation
+            if choices and user_val not in choices:
+                raise ValueError(f"Parameter '{key}' value '{user_val}' is not in valid choices: {choices}")
+            
+            # Min/Max validation (for numeric types)
+            if val_type_str in ["int", "float"]:
+                if min_val is not None and user_val < min_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is less than minimum {min_val}.")
+                if max_val is not None and user_val > max_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is greater than maximum {max_val}.")
+            
+            validated_params[key] = user_val
+
+        # Check for unknown parameters
+        for key in params:
+            if key not in definition:
+                raise ValueError(f"Unknown parameter '{key}' provided.")
+                
+        return validated_params
+
+    @classmethod
     def get_parameters_definition(cls): # Same as original
         return {
             "symbol": {"type": "string", "default": "BTC/USDT", "label": "Trading Symbol"},
@@ -102,7 +175,16 @@ class CPRStrategy:
             "rsi_threshold_entry": {"type": "float", "default": 25.0, "label": "RSI Entry Threshold (Daily)"},
             "use_prev_day_cpr_tp_filter": {"type": "bool", "default": True, "label": "Use Prev. Day CPR for Reduced TP"},
             "reduced_tp_percent_if_filter": {"type": "float", "default": 0.2, "label": "Reduced TP % if Filter Active"},
-            "use_monthly_cpr_filter_entry": {"type": "bool", "default": True, "label": "Use Monthly CPR Entry Filter"}
+            "use_monthly_cpr_filter_entry": {"type": "bool", "default": True, "label": "Use Monthly CPR Entry Filter"},
+            
+            # New parameters
+            "daily_rsi_period": {"type": "int", "default": 14, "min": 5, "max": 50, "label": "Daily RSI Period"},
+            "entry_window_start_hour_utc": {"type": "int", "default": 0, "min": 0, "max": 23, "label": "Entry Window Start Hour (UTC)"},
+            "entry_window_start_minute_utc": {"type": "int", "default": 0, "min": 0, "max": 59, "label": "Entry Window Start Minute (UTC)"},
+            "entry_window_duration_minutes": {"type": "int", "default": 10, "min": 1, "max": 120, "label": "Entry Window Duration (Minutes)"},
+            "entry_cooldown_seconds": {"type": "int", "default": 300, "min": 0, "label": "Entry Cooldown (Seconds)"},
+            "eod_close_hour_utc": {"type": "int", "default": 23, "min": 0, "max": 23, "label": "EOD Close Hour (UTC)"},
+            "eod_close_minute_utc": {"type": "int", "default": 55, "min": 0, "max": 59, "label": "EOD Close Minute (UTC)"},
         }
 
     def _fetch_precisions(self): # Renamed from _get_precisions
@@ -222,12 +304,12 @@ class CPRStrategy:
         return P, TC, BC, R1, S1, R2, S2, R3, S3, R4, S4
 
     def _calculate_indicators(self, df_daily: pd.DataFrame): # Same as original
-        if df_daily.empty or len(df_daily) < 50: logger.warning(f"Not enough daily data for indicators."); return None
+        if df_daily.empty or len(df_daily) < 50: logger.warning(f"Not enough daily data for indicators."); return None # Max lookback for default EMAs/MACD
         indicators = pd.Series(dtype='float64'); price_data = df_daily['close'] 
-        indicators['EMA_21'] = ta.trend.EMAIndicator(price_data, window=21).ema_indicator().iloc[-1]
-        indicators['EMA_50'] = ta.trend.EMAIndicator(price_data, window=50).ema_indicator().iloc[-1]
-        indicators['RSI'] = ta.momentum.RSIIndicator(price_data, window=14).rsi().iloc[-1]
-        macd_obj = ta.trend.MACD(price_data, window_fast=12, window_slow=26, window_sign=9)
+        indicators['EMA_21'] = ta.trend.EMAIndicator(price_data, window=21).ema_indicator().iloc[-1] # Kept as is, not driving CPR logic
+        indicators['EMA_50'] = ta.trend.EMAIndicator(price_data, window=50).ema_indicator().iloc[-1] # Kept as is
+        indicators['RSI'] = ta.momentum.RSIIndicator(price_data, window=self.daily_rsi_period).rsi().iloc[-1] # Use parameterized period
+        macd_obj = ta.trend.MACD(price_data, window_fast=12, window_slow=26, window_sign=9) # Kept as is
         if macd_obj is not None: indicators['MACD_Histo']=macd_obj.macd_diff().iloc[-1]; indicators['MACD']=macd_obj.macd().iloc[-1]; indicators['MACD_Signal']=macd_obj.macd_signal().iloc[-1]
         else: indicators['MACD_Histo']=indicators['MACD']=indicators['MACD_Signal']=np.nan
         return indicators.fillna(0)
@@ -485,7 +567,7 @@ class CPRStrategy:
             self._close_position_live("BC Hit", exchange_ccxt); return
 
         now_utc = datetime.now(pytz.utc)
-        if now_utc.hour == 23 and now_utc.minute >= 55: # EOD
+        if now_utc.hour == self.eod_close_hour_utc and now_utc.minute >= self.eod_close_minute_utc: # EOD
              self.logger.info(f"End of day. Closing PosID {self.active_position_db_id}.")
              self._close_position_live("End of Day", exchange_ccxt); return
 
@@ -509,20 +591,285 @@ class CPRStrategy:
         
         if self.data_prepared_for_utc_date == now_utc.date():
             if not self.active_position_db_id: # No active position
-                if now_utc.hour == 0 and now_utc.minute < 10: # Entry window
-                     if self.last_entry_attempt_utc_time is None or (now_utc - self.last_entry_attempt_utc_time).total_seconds() > 300: 
+                entry_window_start_dt = now_utc.replace(hour=self.entry_window_start_hour_utc, minute=self.entry_window_start_minute_utc, second=0, microsecond=0)
+                entry_window_end_dt = entry_window_start_dt + timedelta(minutes=self.entry_window_duration_minutes)
+                
+                if entry_window_start_dt <= now_utc < entry_window_end_dt: # Entry window
+                     if self.last_entry_attempt_utc_time is None or (now_utc - self.last_entry_attempt_utc_time).total_seconds() > self.entry_cooldown_seconds: 
                          self._check_entry_conditions_live(current_exchange_ccxt)
                          self.last_entry_attempt_utc_time = now_utc
                      else: self.logger.debug(f"In entry cooldown.")
-                else: self.logger.debug(f"Not within entry window (00:00-00:10 UTC).")
+                else: self.logger.debug(f"Not within entry window ({entry_window_start_dt.strftime('%H:%M')}-{entry_window_end_dt.strftime('%H:%M')} UTC).")
             else: # Active position exists
                 self._check_exit_conditions_live(current_exchange_ccxt)
         else:
             self.logger.debug(f"Daily data for {now_utc.date()} not yet prepared. Current: {self.data_prepared_for_utc_date}")
         self.logger.debug(f"Live signal execution cycle finished for SubID {self.user_sub_obj.id}.")
 
-    def run_backtest(self, historical_data_feed, current_simulated_time_utc):
-        self.logger.warning(f"[{self.name}-{self.symbol}] Backtesting for CPR strategy is complex. This is a simplified conceptual outline.")
-        return {"pnl": 0, "trades": [], "message": "CPR backtesting not fully implemented in this refactor."}
+    def _prepare_daily_data_for_backtest(self, full_ohlcv_df: pd.DataFrame, current_bar_timestamp: pd.Timestamp):
+        today_utc_date = current_bar_timestamp.normalize().date() # Get date part only, normalized to midnight
+        
+        # Data for CPR (previous day)
+        prev_day_date = today_utc_date - pd.Timedelta(days=1)
+        prev_day_data_for_cpr = full_ohlcv_df[full_ohlcv_df.index.normalize().date() == prev_day_date]
+        if prev_day_data_for_cpr.empty:
+            self.daily_cpr = None
+        else:
+            # Assuming daily data would be aggregated if timeframe is smaller, or use daily feed directly
+            # For simplicity, if we have finer data, we take the last HLC of previous day.
+            # If ohlcv_data is already daily, then prev_day_data_for_cpr.iloc[-1] is correct.
+            # If ohlcv_data is intraday, we need to aggregate it to get daily HLC for previous day.
+            # For this example, let's assume '1d' data can be derived or is primary for CPR.
+            # This part might need adjustment based on how historical_data_feed provides '1d' data.
+            # For now, using the last available data from previous day.
+            prev_day_high = prev_day_data_for_cpr['high'].max()
+            prev_day_low = prev_day_data_for_cpr['low'].min()
+            prev_day_close = prev_day_data_for_cpr['close'].iloc[-1] # Last close of previous day
+            self.daily_cpr = self._calculate_cpr(prev_day_high, prev_day_low, prev_day_close)
+
+        # Data for Indicators (up to end of previous day)
+        df_for_indicators = full_ohlcv_df[full_ohlcv_df.index < current_bar_timestamp.normalize()]
+        self.daily_indicators = self._calculate_indicators(df_for_indicators) # Pass DataFrame of daily candles
+
+        # Today's daily open
+        today_data = full_ohlcv_df[full_ohlcv_df.index.normalize().date() == today_utc_date]
+        self.today_daily_open_utc = today_data['open'].iloc[0] if not today_data.empty else None
+        
+        self.data_prepared_for_utc_date = today_utc_date
+        self.logger.debug(f"Live signal execution cycle finished for SubID {self.user_sub_obj.id}.")
+
+    def _prepare_daily_data_for_backtest(self, full_ohlcv_df: pd.DataFrame, current_bar_timestamp: pd.Timestamp):
+        # Ensure all timestamps are UTC for consistent date comparisons
+        current_bar_timestamp_utc = current_bar_timestamp.tz_convert('UTC') if current_bar_timestamp.tzinfo else current_bar_timestamp.tz_localize('UTC')
+        today_utc_date = current_bar_timestamp_utc.normalize().date() 
+
+        if self.data_prepared_for_utc_date == today_utc_date: # Already prepared for this date
+            return
+
+        self.logger.debug(f"[BT] Preparing daily data for {self.symbol} on {today_utc_date}")
+        
+        # Data for CPR (previous day's HLC)
+        prev_day_utc_date = today_utc_date - pd.Timedelta(days=1)
+        # Ensure full_ohlcv_df.index is also UTC
+        df_index_utc = full_ohlcv_df.index.tz_convert('UTC') if full_ohlcv_df.index.tzinfo else full_ohlcv_df.index.tz_localize('UTC')
+        
+        prev_day_candles_for_cpr = full_ohlcv_df[df_index_utc.normalize().date() == prev_day_utc_date]
+
+        if prev_day_candles_for_cpr.empty:
+            self.daily_cpr = None
+            self.logger.warning(f"[BT] No data for previous day {prev_day_utc_date} to calculate CPR for {today_utc_date}.")
+        else:
+            prev_day_high = prev_day_candles_for_cpr['high'].max()
+            prev_day_low = prev_day_candles_for_cpr['low'].min()
+            prev_day_close = prev_day_candles_for_cpr['close'].iloc[-1]
+            self.daily_cpr = self._calculate_cpr(prev_day_high, prev_day_low, prev_day_close)
+
+        # Data for Indicators (up to end of previous day)
+        # Create a daily resampled DataFrame for indicators like RSI, EMA, MACD if they are daily based
+        # Assuming self.cpr_timeframe is '1d' for these indicators as well
+        # This part depends on whether indicators are calculated on daily candles or execution timeframe candles
+        # For CPR strategy, daily_indicators are calculated on daily data.
+        daily_resample_for_indicators = full_ohlcv_df[df_index_utc < today_utc_date].resample('D').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).dropna()
+        self.daily_indicators = self._calculate_indicators(daily_resample_for_indicators)
+
+        # Today's daily open (from the first candle of today on the execution timeframe)
+        today_candles = full_ohlcv_df[df_index_utc.normalize().date() == today_utc_date]
+        self.today_daily_open_utc = float(today_candles['open'].iloc[0]) if not today_candles.empty else None
+        
+        # Note: Weekly and Monthly CPR for backtesting would require more complex data handling
+        # to ensure correct historical weekly/monthly candles are used.
+        # For now, they might be None or based on available data which might not be perfectly aligned.
+        self.weekly_cpr = None # Simplified for this backtest version
+        self.monthly_cpr = None # Simplified
+        self.monthly_cpr_filter_active = False # Default if monthly_cpr is None
+        # If self.use_monthly_cpr_filter_entry and self.monthly_cpr and self.today_daily_open_utc:
+        #    mP, mTC, mBC, *_ = self.monthly_cpr
+        #    if mBC <= self.today_daily_open_utc <= mTC: self.monthly_cpr_filter_active = True
+
+        self.data_prepared_for_utc_date = today_utc_date
+        self.logger.info(f"[BT] Daily data prepared for {self.symbol} on {self.data_prepared_for_utc_date}. Open: {self.today_daily_open_utc}, CPR: {'Set' if self.daily_cpr else 'Not Set'}")
+
+
+    def run_backtest(self, ohlcv_data: pd.DataFrame, initial_capital: float = 10000.0, params: Optional[Dict[str,Any]] = None):
+        self.logger.info(f"[{self.name}-{self.symbol}] Starting backtest...")
+        
+        # Override instance params if provided in backtest call (important for backtesting service)
+        original_instance_params = self.params # Store original for restoration if needed
+        if params:
+            self.params = {**self.params, **params} # Merge, with `params` taking precedence
+            # Re-initialize relevant attributes from self.params
+            self.symbol = self.params.get("symbol", "BTC/USDT")
+            self.capital = Decimal(str(self.params.get("capital", str(initial_capital)))) # Use initial_capital as default for self.capital
+            self.risk_percent = Decimal(str(self.params.get("risk_percent", "1.0"))) / Decimal("100")
+            self.leverage = int(self.params.get("leverage", 3)) # Leverage is part of PnL calc
+            self.take_profit_percent = Decimal(str(self.params.get("take_profit_percent", "0.8"))) / Decimal("100")
+            self.sl_percent_from_entry = Decimal(str(self.params.get("sl_percent_from_entry", "3.5"))) / Decimal("100")
+            self.distance_threshold_percent = Decimal(str(self.params.get("distance_threshold_percent", "0.24"))) / Decimal("100")
+            self.max_volatility_threshold_percent = Decimal(str(self.params.get("max_volatility_threshold_percent", "3.48"))) / Decimal("100")
+            self.distance_condition_type = self.params.get("distance_condition_type", "Above")
+            self.pullback_percent_for_entry = Decimal(str(self.params.get("pullback_percent_for_entry", "0.2"))) / Decimal("100")
+            self.s1_bc_dist_thresh_low_percent = Decimal(str(self.params.get("s1_bc_dist_thresh_low_percent", "2.2"))) / Decimal("100")
+            self.s1_bc_dist_thresh_high_percent = Decimal(str(self.params.get("s1_bc_dist_thresh_high_percent", "2.85"))) / Decimal("100")
+            self.rsi_threshold_entry = float(self.params.get("rsi_threshold_entry", 25.0))
+            self.use_prev_day_cpr_tp_filter = self.params.get("use_prev_day_cpr_tp_filter", True)
+            self.reduced_tp_percent_if_filter = Decimal(str(self.params.get("reduced_tp_percent_if_filter", "0.2"))) / Decimal("100")
+            self.use_monthly_cpr_filter_entry = self.params.get("use_monthly_cpr_filter_entry", True)
+            self.logger.info(f"Backtest using merged params: {self.params}")
+
+
+        # Initialize portfolio
+        cash = Decimal(str(initial_capital)) # Not used directly if equity tracks total value
+        equity = Decimal(str(initial_capital))
+        trades_log = []
+        equity_curve = [{'timestamp': ohlcv_data.index[0].isoformat(), 'equity': float(initial_capital)}]
+
+        # Position state for backtesting
+        bt_position_side = None 
+        bt_entry_price = Decimal("0")
+        bt_position_qty = Decimal("0")
+        bt_sl_price = Decimal("0")
+        bt_tp_price = Decimal("0")
+        
+        self.data_prepared_for_utc_date = None # Reset for backtest
+
+        # Ensure datetime index and UTC
+        if not isinstance(ohlcv_data.index, pd.DatetimeIndex):
+            ohlcv_data.index = pd.to_datetime(ohlcv_data.index)
+        if ohlcv_data.index.tzinfo is None:
+            ohlcv_data.index = ohlcv_data.index.tz_localize('UTC')
+        else:
+            ohlcv_data.index = ohlcv_data.index.tz_convert('UTC')
+
+
+        # Loop through historical data
+        for i in range(1, len(ohlcv_data)): 
+            current_bar = ohlcv_data.iloc[i]
+            current_timestamp = current_bar.name 
+            current_price = Decimal(str(current_bar['close']))
+            current_low = Decimal(str(current_bar['low']))
+            current_high = Decimal(str(current_bar['high']))
+            # current_open = Decimal(str(current_bar['open'])) # Already used for today_daily_open_utc
+
+            # Prepare daily data if it's a new day or not yet prepared
+            if self.data_prepared_for_utc_date != current_timestamp.normalize().date():
+                self._prepare_daily_data_for_backtest(ohlcv_data, current_timestamp)
+
+            # --- Exit Logic ---
+            if bt_position_side == 'long':
+                exit_trade = False; exit_price = Decimal("0"); exit_reason = ""
+                if bt_sl_price > 0 and current_low <= bt_sl_price: # Check SL first
+                    exit_price = bt_sl_price; exit_reason = "SL Hit"; exit_trade = True
+                elif bt_tp_price > 0 and current_high >= bt_tp_price: # Then TP
+                    exit_price = bt_tp_price; exit_reason = "TP Hit"; exit_trade = True
+                
+                if not exit_trade and self.daily_cpr: # Discretionary exits
+                    _, _, BC_cpr, *_ = self.daily_cpr
+                    if current_price <= BC_cpr:
+                        exit_price = current_price; exit_reason = "BC Hit"; exit_trade = True
+                
+                if not exit_trade and current_timestamp.hour == self.eod_close_hour_utc and current_timestamp.minute >= self.eod_close_minute_utc: # EOD
+                    exit_price = current_price; exit_reason = "EOD Close"; exit_trade = True
+                
+                if exit_trade:
+                    pnl = (exit_price - bt_entry_price) * bt_position_qty * self.leverage 
+                    equity += pnl
+                    trades_log.append({
+                        'timestamp': current_timestamp.isoformat(), 'type': 'sell', 
+                        'price': float(exit_price), 'quantity': float(bt_position_qty), 
+                        'pnl_realized': float(pnl), 'reason': exit_reason, 'equity': float(equity)
+                    })
+                    self.logger.info(f"[BT] Close LONG: Qty {bt_position_qty} at {exit_price}. PnL: {pnl:.2f}. Equity: {equity:.2f}. Reason: {exit_reason}")
+                    bt_position_side = None; bt_position_qty = Decimal("0")
+
+            # --- Entry Logic ---
+            if not bt_position_side and self.data_prepared_for_utc_date == current_timestamp.normalize().date():
+                bt_entry_window_start_dt = current_timestamp.replace(hour=self.entry_window_start_hour_utc, minute=self.entry_window_start_minute_utc, second=0, microsecond=0)
+                bt_entry_window_end_dt = bt_entry_window_start_dt + timedelta(minutes=self.entry_window_duration_minutes)
+
+                if bt_entry_window_start_dt <= current_timestamp < bt_entry_window_end_dt: # Entry window
+                    if self.daily_cpr and self.daily_indicators and self.today_daily_open_utc is not None:
+                        P_cpr, TC_cpr, BC_cpr, R1_cpr, S1_cpr, *_ = self.daily_cpr
+                        daily_open_val = Decimal(str(self.today_daily_open_utc))
+                        rsi_daily_val = Decimal(str(self.daily_indicators.get('RSI', 50)))
+
+                        bc_dist_pct_val = abs(daily_open_val - BC_cpr) / BC_cpr if BC_cpr != Decimal("0") else Decimal("Infinity")
+                        dist_cond_met_val = (self.distance_condition_type == "Above" and daily_open_val > BC_cpr and bc_dist_pct_val >= self.distance_threshold_percent) or \
+                                        (self.distance_condition_type == "Below" and daily_open_val < BC_cpr and bc_dist_pct_val >= self.distance_threshold_percent)
+                        
+                        s1_bc_dist_pct_val = abs(S1_cpr - BC_cpr) / BC_cpr if BC_cpr != Decimal("0") else Decimal("Infinity")
+                        s1_bc_cond_met_val = (self.s1_bc_dist_thresh_low_percent <= s1_bc_dist_pct_val <= self.s1_bc_dist_thresh_high_percent)
+                        
+                        rsi_cond_met_val = rsi_daily_val <= Decimal(str(self.rsi_threshold_entry))
+                        monthly_filter_passes = not (self.use_monthly_cpr_filter_entry and getattr(self, 'monthly_cpr_filter_active', False))
+
+                        if dist_cond_met_val and s1_bc_cond_met_val and rsi_cond_met_val and monthly_filter_passes:
+                            target_entry_price_val = daily_open_val * (Decimal("1") - self.pullback_percent_for_entry) if self.distance_condition_type == "Above" else daily_open_val * (Decimal("1") + self.pullback_percent_for_entry)
+                            
+                            if self.distance_condition_type == "Above" and current_low <= target_entry_price_val:
+                                bt_entry_price = target_entry_price_val 
+                                bt_position_side = 'long'
+                                
+                                risk_amount_for_trade = equity * self.risk_percent 
+                                sl_distance_from_entry = bt_entry_price * self.sl_percent_from_entry
+                                bt_sl_price = bt_entry_price - sl_distance_from_entry
+                                
+                                if sl_distance_from_entry > 0:
+                                    # Calculate notional size based on risk and SL distance
+                                    # position_notional_value = risk_amount_for_trade / (sl_distance_from_entry / bt_entry_price)
+                                    # For leveraged trading, this notional value is what's traded.
+                                    # The actual margin used is notional_value / leverage.
+                                    # Here, self.capital is the total allocated capital for the strategy instance.
+                                    # We use self.capital from params, which can be overridden by backtest initial_capital.
+                                    position_notional_usd = (self.capital * self.risk_percent) / self.sl_percent_from_entry # This is using strategy's total capital for sizing
+                                    bt_position_qty = (position_notional_usd / bt_entry_price) 
+                                    
+                                    effective_tp_percent = self.take_profit_percent
+                                    if self.use_prev_day_cpr_tp_filter and self.daily_cpr:
+                                        prev_P, _, _, _, _, _, _, _, _, _, _ = self.daily_cpr # prev_P is Decimal
+                                        if bt_entry_price < prev_P and (bt_entry_price * (Decimal("1") + effective_tp_percent)) > prev_P:
+                                            effective_tp_percent = self.reduced_tp_percent_if_filter
+                                    bt_tp_price = bt_entry_price * (Decimal("1") + effective_tp_percent)
+
+                                    trades_log.append({
+                                        'timestamp': current_timestamp.isoformat(), 'type': 'buy',
+                                        'price': float(bt_entry_price), 'quantity': float(bt_position_qty),
+                                        'pnl_realized': 0.0, 'reason': 'CPR Entry', 'equity': float(equity)
+                                    })
+                                    self.logger.info(f"[BT] Open LONG: Qty {bt_position_qty:.8f} at {bt_entry_price:.2f}. SL: {bt_sl_price:.2f}, TP: {bt_tp_price:.2f}")
+                                else: 
+                                    bt_position_side = None # Invalid SL, cancel entry
+                                    self.logger.warning(f"[BT] SL distance zero or negative for entry. No trade.")
+                            # else: (No short entry logic for CPR strategy as implemented)
+            
+            equity_curve.append({'timestamp': current_timestamp.isoformat(), 'equity': float(equity)})
+
+        # Final PNL calculation
+        final_pnl = equity - Decimal(str(initial_capital))
+        final_pnl_percent = (final_pnl / Decimal(str(initial_capital))) * Decimal("100") if initial_capital > 0 else Decimal("0")
+        
+        win_trades = sum(1 for t in trades_log if t['pnl_realized'] > 0)
+        loss_trades = sum(1 for t in trades_log if t['pnl_realized'] < 0)
+
+        self.logger.info(f"[{self.name}-{self.symbol}] Backtest finished. Final PnL: {final_pnl:.2f} ({final_pnl_percent:.2f}%)")
+        
+        # Restore original params if they were overridden for this backtest run
+        if params: self.params = original_instance_params
+
+        return {
+            "pnl": float(final_pnl),
+            "pnl_percentage": float(final_pnl_percent), 
+            "total_trades": len(trades_log),
+            "winning_trades": win_trades,
+            "losing_trades": loss_trades,
+            "sharpe_ratio": 0.0, 
+            "max_drawdown": 0.0, 
+            "trades_log": trades_log,
+            "equity_curve": equity_curve,
+            "message": "Backtest completed successfully.",
+            "initial_capital": initial_capital, 
+            "final_equity": float(equity) 
+        }
 
 ```
