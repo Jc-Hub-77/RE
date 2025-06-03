@@ -347,7 +347,8 @@ def forgot_password_request(db_session: Session, email: str):
         # Still return success to prevent email enumeration
         return {"status": "success", "message": "If an account with this email exists, a password reset link has been sent."}
 
-    plain_token, expires_at = _generate_secure_token_data(1) # Password reset tokens usually have shorter expiry (e.g., 1 hour)
+    plain_token, expires_at = _generate_secure_token_data(1) # Password reset token expiry set to 1 hour.
+                                                              # This duration could be made configurable via settings if needed.
     user.password_reset_token = _get_password_hash(plain_token) # Store the hashed token
     user.password_reset_token_expires_at = expires_at
     

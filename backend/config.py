@@ -18,96 +18,121 @@ class Settings:
     PROJECT_VERSION: str = "0.1.0"
 
     # Database settings
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./trading_platform_local.db")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "YOUR_PRODUCTION_DATABASE_URL_CHANGE_ME")
     
     # JWT settings
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "a_very_secure_default_secret_key_please_change_me")
+    # IMPORTANT: This key is crucial for security. It should be a long, random, and unique string.
+    # Generate a strong key using: import secrets; secrets.token_hex(32)
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "YOUR_PRODUCTION_JWT_SECRET_KEY_CHANGE_ME")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 48
 
     # API Key Encryption Key (for encrypting sensitive exchange API keys)
+    # This key is used to encrypt sensitive data like external API keys stored by users.
+    # Generate a strong key using: import secrets; secrets.token_hex(32)
     API_ENCRYPTION_KEY: Optional[str] = os.getenv("API_ENCRYPTION_KEY")
 
-    # Email settings (placeholders, configure for a real email service)
+    # Email settings
     SMTP_TLS: bool = True
     SMTP_PORT: int | None = os.getenv("SMTP_PORT", 587)
-    SMTP_HOST: str | None = os.getenv("SMTP_HOST")
-    SMTP_USER: str | None = os.getenv("SMTP_USER")
-    SMTP_PASSWORD: str | None = os.getenv("SMTP_PASSWORD")
-    EMAILS_FROM_EMAIL: str | None = os.getenv("EMAILS_FROM_EMAIL")
-    EMAILS_FROM_NAME: str | None = os.getenv("EMAILS_FROM_NAME", "Trading Platform")
+    SMTP_HOST: str | None = os.getenv("SMTP_HOST", "YOUR_PRODUCTION_SMTP_HOST_CHANGE_ME")
+    SMTP_USER: str | None = os.getenv("SMTP_USER", "your_production_smtp_user@example.com")
+    SMTP_PASSWORD: str | None = os.getenv("SMTP_PASSWORD") # For production, ensure this is set via env var
+    EMAILS_FROM_EMAIL: str | None = os.getenv("EMAILS_FROM_EMAIL", "noreply@yourfrontend.com")
+    EMAILS_FROM_NAME: str | None = os.getenv("EMAILS_FROM_NAME", "Your Platform Name")
     
-    # Frontend URL for generating links (e.g., email verification)
-    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:8080") # Assuming frontend runs on 8080
+    # Frontend URL for generating links (e.g., email verification, password reset)
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://yourfrontend.com")
 
     # CORS settings
-    # Adjust according to your frontend's origin
-    ALLOWED_ORIGINS: List[str] = os.getenv("ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(',')
+    # Define the origins allowed to make cross-site requests to your backend.
+    ALLOWED_ORIGINS: List[str] = os.getenv("ALLOWED_ORIGINS", "https://yourfrontend.com,https://www.yourfrontend.com").split(',')
 
     # Referral System Settings
     REFERRAL_COMMISSION_RATE: float = float(os.getenv("REFERRAL_COMMISSION_RATE", "0.10"))  # 10%
     REFERRAL_MINIMUM_PAYOUT_USD: float = float(os.getenv("REFERRAL_MINIMUM_PAYOUT_USD", "20.00"))
 
-    # Payment Gateway Settings (Coinbase Commerce Example)
-    COINBASE_COMMERCE_API_KEY: Optional[str] = os.getenv("COINBASE_COMMERCE_API_KEY")
-    COINBASE_COMMERCE_WEBHOOK_SECRET: Optional[str] = os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET")
-    # URLs for payment redirects (can be overridden in charge creation)
+    # Default capital for live strategies if not specified in custom parameters.
+    # Can be overridden by the 'capital' value in a strategy's custom parameters.
+    DEFAULT_STRATEGY_CAPITAL: float = float(os.getenv("DEFAULT_STRATEGY_CAPITAL", "10000.0"))
+
+    # Payment Gateway Settings (Example: Coinbase Commerce)
+    # Ensure these are set via environment variables in production.
+    COINBASE_COMMERCE_API_KEY: Optional[str] = os.getenv("COINBASE_COMMERCE_API_KEY") # e.g., your_coinbase_commerce_api_key
+    COINBASE_COMMERCE_WEBHOOK_SECRET: Optional[str] = os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET") # e.g., your_coinbase_webhook_secret
+    # URLs for payment redirects will use the updated FRONTEND_URL default
     APP_PAYMENT_SUCCESS_URL: str = os.getenv("APP_PAYMENT_SUCCESS_URL", f"{FRONTEND_URL}/payment/success")
     APP_PAYMENT_CANCEL_URL: str = os.getenv("APP_PAYMENT_CANCEL_URL", f"{FRONTEND_URL}/payment/cancel")
 
-    # Directory for strategies
+    # Directory for user-defined strategies.
+    # For production, this MUST be an absolute path to a secure, persistent location outside the application's ephemeral container storage.
     STRATEGIES_DIR: Optional[str] = os.getenv("STRATEGIES_DIR")
 
 
 settings = Settings()
 
 if not settings.STRATEGIES_DIR:
-    # Fallback for development if not set, assuming 'strategies' dir is one level above 'backend'
-    # For production, this should be explicitly set.
+    # Fallback for development if STRATEGIES_DIR is not set.
+    # Assumes 'strategies' directory is one level above 'backend'.
+    # For production, STRATEGIES_DIR MUST be explicitly set to an appropriate, persistent path.
     strategies_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "strategies")
     if os.path.isdir(strategies_path):
         settings.STRATEGIES_DIR = strategies_path
-    else:
-        # If neither env var nor default path exists, raise error or log warning
-        # For now, let's log a warning, consistent with how API_ENCRYPTION_KEY is handled if missing (though that one is critical)
-        print("WARNING: STRATEGIES_DIR environment variable is not set and default path not found.")
-        # settings.STRATEGIES_DIR = None # Or some other default if appropriate
+    # No 'else' here; production check below will handle missing STRATEGIES_DIR.
 
 if os.getenv("ENVIRONMENT") == "production":
-    # Ensure JWT_SECRET_KEY is not the default in a production-like environment
-    if settings.JWT_SECRET_KEY == "a_very_secure_default_secret_key_please_change_me":
-        # Consider raising an error for critical misconfigurations
-        print("CRITICAL ERROR: JWT_SECRET_KEY must be set to a strong, unique secret in production!")
-        # For truly critical, you might exit: import sys; sys.exit(1)
+    # Critical Production Validations
+    # Halt startup if essential production configurations are missing or insecure.
 
-    # Ensure API_ENCRYPTION_KEY is set in a production environment
+    # Validate JWT_SECRET_KEY
+    if settings.JWT_SECRET_KEY == "YOUR_PRODUCTION_JWT_SECRET_KEY_CHANGE_ME" or \
+       settings.JWT_SECRET_KEY == "a_very_secure_default_secret_key_please_change_me": # Check old default too
+        raise ValueError("CRITICAL: JWT_SECRET_KEY is not set or is using a default placeholder. "
+                         "Set a strong, unique secret in the environment for production.")
+
+    # Validate API_ENCRYPTION_KEY
     if not settings.API_ENCRYPTION_KEY:
-        print("CRITICAL ERROR: API_ENCRYPTION_KEY must be set in a production environment!")
+        raise ValueError("CRITICAL: API_ENCRYPTION_KEY is not set. "
+                         "Set a strong encryption key in the environment for production.")
 
-    # Check for STRATEGIES_DIR
-    if not settings.STRATEGIES_DIR or "strategies" in (settings.STRATEGIES_DIR or "") and "backend" not in (settings.STRATEGIES_DIR or "") : # Basic check if it's unset or still the dev default
-        print("CRITICAL WARNING: STRATEGIES_DIR is not explicitly configured for production or might be using a default development path. Ensure it points to the correct production location.")
+    # Validate STRATEGIES_DIR
+    if not settings.STRATEGIES_DIR or \
+       "backend" in settings.STRATEGIES_DIR or \
+       "strategies" == os.path.basename(settings.STRATEGIES_DIR.rstrip('/\\')): # Check if it's just 'strategies'
+        raise ValueError("CRITICAL: STRATEGIES_DIR is not configured correctly for production. "
+                         "It must be an absolute path to a secure, persistent location "
+                         "and not a default development path (e.g., './strategies' or within 'backend').")
 
-    # SMTP Settings Checks
-    if not settings.SMTP_HOST or settings.SMTP_HOST == "your_smtp_host":
-        print("CRITICAL WARNING: SMTP_HOST is not configured for production. Email functionality will be affected.")
-    # Add checks for SMTP_USER, SMTP_PASSWORD, EMAILS_FROM_EMAIL if they are always required for your setup
-    # For example:
-    # if not settings.SMTP_USER:
-    #     print("CRITICAL WARNING: SMTP_USER is not configured for production.")
-    # if not settings.SMTP_PASSWORD: # Be careful about logging presence of password itself
-    #     print("CRITICAL WARNING: SMTP_PASSWORD is not configured for production.")
-    # if not settings.EMAILS_FROM_EMAIL:
-    #     print("CRITICAL WARNING: EMAILS_FROM_EMAIL is not configured for production.")
+    # Validate Database URL
+    if settings.DATABASE_URL == "YOUR_PRODUCTION_DATABASE_URL_CHANGE_ME" or \
+       settings.DATABASE_URL.startswith("sqlite:"):
+        raise ValueError("CRITICAL: DATABASE_URL is not configured for production or is using SQLite. "
+                         "Set a valid production database URL (e.g., PostgreSQL, MySQL) in the environment.")
 
-    # Payment Gateway Settings Checks
-    if not settings.COINBASE_COMMERCE_API_KEY or settings.COINBASE_COMMERCE_API_KEY == "your_coinbase_commerce_api_key_here":
-        print("CRITICAL WARNING: COINBASE_COMMERCE_API_KEY is not configured for production. Payment gateway functionality will be affected.")
+    # Validate Frontend URL
+    if settings.FRONTEND_URL == "https://yourfrontend.com" or \
+       settings.FRONTEND_URL.startswith("http://localhost"):
+        raise ValueError("CRITICAL: FRONTEND_URL is not configured for production or is using a local/placeholder URL. "
+                         "Set the correct public frontend URL in the environment.")
     
-    if not settings.COINBASE_COMMERCE_WEBHOOK_SECRET or settings.COINBASE_COMMERCE_WEBHOOK_SECRET == "your_coinbase_commerce_webhook_secret_here":
-        print("CRITICAL WARNING: COINBASE_COMMERCE_WEBHOOK_SECRET is not configured for production. Payment gateway webhook verification will fail.")
+    # Validate SMTP Settings
+    if not settings.SMTP_HOST or settings.SMTP_HOST == "YOUR_PRODUCTION_SMTP_HOST_CHANGE_ME":
+        raise ValueError("CRITICAL: SMTP_HOST is not configured for production.")
+    if not settings.SMTP_USER or settings.SMTP_USER == "your_production_smtp_user@example.com":
+        raise ValueError("CRITICAL: SMTP_USER is not configured for production.")
+    if not settings.SMTP_PASSWORD: # SMTP_PASSWORD should not have a default value other than None
+        raise ValueError("CRITICAL: SMTP_PASSWORD is not configured for production.")
+    if not settings.EMAILS_FROM_EMAIL or settings.EMAILS_FROM_EMAIL == "noreply@yourfrontend.com":
+        raise ValueError("CRITICAL: EMAILS_FROM_EMAIL is not configured for production.")
 
+    # Validate Payment Gateway Settings
+    if not settings.COINBASE_COMMERCE_API_KEY:
+        raise ValueError("CRITICAL: COINBASE_COMMERCE_API_KEY is not configured for production.")
+    if not settings.COINBASE_COMMERCE_WEBHOOK_SECRET:
+        raise ValueError("CRITICAL: COINBASE_COMMERCE_WEBHOOK_SECRET is not configured for production.")
 
-if not settings.DATABASE_URL:
+# General check for DATABASE_URL (applies to all environments)
+# This is somewhat redundant due to the production check above, but good as a basic guard.
+if not settings.DATABASE_URL: # This check was already here and is fine.
     raise ValueError("DATABASE_URL not set. Please configure it in .env or environment variables.")

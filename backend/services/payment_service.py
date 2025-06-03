@@ -169,7 +169,7 @@ def _process_successful_payment(db_session: Session, payment_transaction: Paymen
 
 # --- Payment Gateway Interaction ---
 def create_coinbase_commerce_charge(db_session: Session, user_id: int, 
-                                   item_id: int, 
+                                   item_id: int, # IMPORTANT: See docstring for how item_id relates to item_type.
                                    item_type: str, 
                                    item_name: str, 
                                    item_description: str,
@@ -179,10 +179,37 @@ def create_coinbase_commerce_charge(db_session: Session, user_id: int,
                                    cancel_url: str = None,
                                    metadata: Optional[Dict[str, Any]] = None
                                    ):
+    """
+    Creates a charge using Coinbase Commerce.
+
+    Args:
+        db_session (Session): SQLAlchemy database session.
+        user_id (int): The ID of the user initiating the payment.
+        item_id (int): The ID of the item being purchased.
+                       - For `item_type="new_strategy_subscription"`, this MUST be the `Strategy.id`.
+                       - For `item_type="renew_strategy_subscription"`, this MUST be the `UserStrategySubscription.id`.
+        item_type (str): Type of item being purchased (e.g., "new_strategy_subscription", "renew_strategy_subscription").
+        item_name (str): Name of the item.
+        item_description (str): Description of the item.
+        amount_usd (float): The amount in USD for the charge.
+        subscription_months (int): Duration of the subscription in months.
+        redirect_url (Optional[str]): URL to redirect to after successful payment.
+        cancel_url (Optional[str]): URL to redirect to if payment is cancelled.
+        metadata (Optional[Dict[str, Any]]): Caller-provided metadata.
+            Crucial for `_process_successful_payment`. Must contain:
+            - For `item_type="new_strategy_subscription"`: `api_key_id` (int), `custom_parameters_json` (str).
+            (Other types may have their own requirements).
+
+    Returns:
+        Dict[str, Any]: A dictionary containing the status and charge details or an error message.
+    """
     user = db_session.query(User).filter(User.id == user_id).first()
     if not user: return {"status": "error", "message": "User not found."}
 
     internal_transaction_ref = str(uuid.uuid4())
+    # metadata_for_charge is augmented with standard fields.
+    # Caller MUST ensure the initial 'metadata' dict contains any item_type-specific
+    # fields needed by _process_successful_payment (e.g., api_key_id, custom_parameters_json for new subs).
     metadata_for_charge = metadata if metadata is not None else {}
     metadata_for_charge.update({
         'internal_transaction_ref': internal_transaction_ref,
@@ -465,15 +492,13 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
                     # Let's assume the one from charge creation is a JSON dict of the metadata.
                     parsed_gateway_json = json.loads(transaction.gateway_metadata_json)
                     if isinstance(parsed_gateway_json, dict) and 'internal_transaction_ref' in parsed_gateway_json:
-                        # This looks like the metadata stored at charge creation
                         reconstructed_metadata = parsed_gateway_json
-                        logger.info(f"Reconstructed metadata for TxID {transaction.id} from gateway_metadata_json (charge creation): {reconstructed_metadata}")
-                    elif isinstance(parsed_gateway_json, dict) and 'event' in parsed_gateway_json and 'data' in parsed_gateway_json['event']:
-                        # This looks like a full webhook payload. Extract metadata from it.
-                        reconstructed_metadata = parsed_gateway_json['event']['data'].get('metadata', {})
-                        logger.info(f"Reconstructed metadata for TxID {transaction.id} from gateway_metadata_json (webhook event): {reconstructed_metadata}")
+                        logger.info(f"TxID {transaction.id}: Reconstructed metadata from gateway_metadata_json (assumed charge creation data).")
+                    elif isinstance(parsed_gateway_json, dict) and 'event' in parsed_gateway_json: # Check for 'event' key for webhook data
+                        reconstructed_metadata = parsed_gateway_json.get('event', {}).get('data', {}).get('metadata', {})
+                        logger.info(f"TxID {transaction.id}: Reconstructed metadata from gateway_metadata_json (assumed webhook event data).")
                     else:
-                        logger.warning(f"TxID {transaction.id}: gateway_metadata_json is present but not in expected charge metadata or webhook format. Content: {transaction.gateway_metadata_json[:200]}")
+                        logger.error(f"TxID {transaction.id}: gateway_metadata_json content was not recognized as charge metadata or webhook event. Content snippet: {transaction.gateway_metadata_json[:250]}")
                         # Fall through to description parsing if format is unrecognized
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse gateway_metadata_json for TxID {transaction.id}: {e}. Content: {transaction.gateway_metadata_json[:200]}")
@@ -484,52 +509,65 @@ def admin_manual_update_payment_status(db_session: Session, transaction_id: int,
                 logger.info(f"TxID {transaction.id}: Attempting to reconstruct metadata from description as gateway_metadata_json was not used or suitable.")
                 desc_metadata_prefix = "Metadata: {" 
                 if desc_metadata_prefix in transaction.description:
-                    metadata_json_str = transaction.description[transaction.description.find(desc_metadata_prefix) + len(desc_metadata_prefix)-1:]
+                    metadata_json_str_start_index = transaction.description.find(desc_metadata_prefix) + len(desc_metadata_prefix) -1
+                    metadata_json_str = transaction.description[metadata_json_str_start_index:]
+
                     brace_level = 0
                     end_index = -1
                     for i, char in enumerate(metadata_json_str):
                         if char == '{': brace_level += 1
                         elif char == '}': brace_level -=1
                         if brace_level == 0 and char == '}': end_index = i; break
+
                     if end_index != -1:
-                        metadata_json_str = metadata_json_str[:end_index+1]
+                        metadata_json_str_extracted = metadata_json_str[:end_index+1]
                         try:
-                            reconstructed_metadata = json.loads(metadata_json_str)
-                            logger.info(f"Reconstructed metadata for TxID {transaction.id} from description: {reconstructed_metadata}")
+                            reconstructed_metadata = json.loads(metadata_json_str_extracted)
+                            logger.info(f"TxID {transaction.id}: Successfully parsed metadata from description.")
                         except json.JSONDecodeError as e:
-                            logger.error(f"Failed to parse metadata from description for TxID {transaction.id}: {e}. Description: {metadata_json_str}")
+                            logger.error(f"TxID {transaction.id}: Failed to parse metadata JSON from description. String used: '{metadata_json_str_extracted}'. Error: {e}")
                     else: 
                         logger.warning(f"Could not find complete metadata JSON in description for TxID {transaction.id}.")
                 else:
-                     logger.warning(f"Metadata marker not found in description for TxID {transaction.id}")
+                     logger.warning(f"TxID {transaction.id}: Metadata marker '{desc_metadata_prefix}' not found in description. Cannot reconstruct metadata from description.")
             
             # Ensure essential fields for _process_successful_payment are present, filling from transaction if not in metadata
             if 'user_id' not in reconstructed_metadata and transaction.user_id:
-                reconstructed_metadata['user_id'] = str(transaction.user_id)
+                reconstructed_metadata['user_id'] = str(transaction.user_id) # Ensure string type like from JSON
             if 'payment_amount_usd' not in reconstructed_metadata and transaction.usd_equivalent:
-                 reconstructed_metadata['payment_amount_usd'] = str(transaction.usd_equivalent)
+                 reconstructed_metadata['payment_amount_usd'] = str(transaction.usd_equivalent) # Ensure string type
 
-            # If critical metadata like item_id, item_type, api_key_id (for new sub) is missing,
-            # _process_successful_payment might fail or partially succeed.
-            if not all(k in reconstructed_metadata for k in ['user_id', 'item_id', 'item_type', 'payment_amount_usd']):
-                 logger.warning(f"Critical metadata missing after reconstruction for TxID {transaction.id}. Post-payment processing might fail or be incomplete. Metadata found: {reconstructed_metadata}")
-                 transaction.status_message += " | Post-processing may fail due to missing metadata."
-                 # Allow to proceed, _process_successful_payment will log specific errors.
+            # Stricter check for required metadata keys
+            required_base_keys = ['user_id', 'item_id', 'item_type', 'payment_amount_usd']
+            missing_keys = [k for k in required_base_keys if k not in reconstructed_metadata or not reconstructed_metadata[k]]
 
+            if reconstructed_metadata.get('item_type') == "new_strategy_subscription":
+                required_new_sub_keys = ['api_key_id', 'custom_parameters_json']
+                # Ensure custom_parameters_json is a string and not empty if present. api_key_id should just exist.
+                missing_keys.extend([k for k in required_new_sub_keys if k not in reconstructed_metadata or \
+                                     (k == 'custom_parameters_json' and not isinstance(reconstructed_metadata.get(k), str)) or \
+                                     (k == 'api_key_id' and not reconstructed_metadata.get(k)) # Ensure api_key_id has a value
+                                    ])
 
-            if not _process_successful_payment(db_session, transaction, reconstructed_metadata):
+            if missing_keys:
+                error_msg = f"Critical metadata missing after reconstruction for TxID {transaction.id}: {missing_keys}. Cannot proceed with post-payment processing."
+                logger.error(error_msg)
+                transaction.status_message = (transaction.status_message or "") + f" | ERROR: {error_msg}"
                 processed_successfully = False
-                # Error logged and status_message updated within _process_successful_payment
-                logger.error(f"Post-payment processing failed for manually completed transaction {transaction_id}.")
-                # transaction.status_message already updated by _process_successful_payment on failure
             else:
-                logger.info(f"Post-payment processing successful for manually completed transaction {transaction_id}.")
+                logger.info(f"TxID {transaction.id}: All required metadata keys present after reconstruction. Proceeding with _process_successful_payment.")
+                if not _process_successful_payment(db_session, transaction, reconstructed_metadata):
+                    processed_successfully = False
+                    # Error logged and status_message updated within _process_successful_payment
+                    logger.error(f"Post-payment processing failed for manually completed transaction {transaction_id}.")
+                else:
+                    logger.info(f"Post-payment processing successful for manually completed transaction {transaction_id}.")
         
     try:
         db_session.commit()
         message = "Payment status updated manually."
         if update_request.new_status == 'completed' and old_status != 'completed':
-            message += " Post-payment processing attempted: " + ("Succeeded." if processed_successfully else "Failed (check logs and transaction status message).")
+            message += " Post-payment processing attempted: " + ("Succeeded." if processed_successfully else "Skipped or Failed (check logs and transaction status message).")
         return {"status": "success", "message": message}
     except SQLAlchemyError as e:
         db_session.rollback()
