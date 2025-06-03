@@ -250,7 +250,10 @@ def run_live_strategy(self, user_sub_id: int):
 def run_backtest_task(self, backtest_result_id: int, user_id: int, strategy_id: int,
                       custom_parameters: dict, symbol: str, timeframe: str,
                       start_date_str: str, end_date_str: str,
-                      initial_capital: float = 10000.0, exchange_id: str = 'binance'):
+                      initial_capital: float = 10000.0, # Default initial capital for backtests.
+                                                        # Consider making this a parameter from the API if varied inputs are common.
+                      exchange_id: str = 'binance'):    # Default exchange for backtests.
+                                                        # Consider making this a parameter from the API for broader exchange support.
     from backend.services.backtesting_service import _perform_backtest_logic # Import inside function
     db_session = None
     try:

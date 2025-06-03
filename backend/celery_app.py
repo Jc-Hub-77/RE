@@ -3,7 +3,8 @@ import os
 
 # Configure Celery
 # Using Redis as the broker and result backend
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# IMPORTANT: For production, this URL must be set to your actual Redis instance.
+REDIS_URL = os.getenv("REDIS_URL", "YOUR_PRODUCTION_REDIS_URL_CHANGE_ME")
 
 celery_app = Celery(
     "trading_platform",
