@@ -14,6 +14,7 @@ import datetime # Added for default datetimes
 
 # revision identifiers, used by Alembic.
 revision: str = '9feeb80d8c05'
+revises: Union[str, None] = None
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

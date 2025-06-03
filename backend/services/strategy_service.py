@@ -136,21 +136,23 @@ def create_or_update_strategy_subscription(db_session: Session, user_id: int, st
 
     if hasattr(StrategyClass, 'validate_parameters') and callable(getattr(StrategyClass, 'validate_parameters')):
         try:
-            is_valid = getattr(StrategyClass, 'validate_parameters')(custom_parameters)
-            if is_valid is False: # Explicitly check for False if it can return boolean
-                logger.warning(f"Subscription creation/update: Validation failed for strategy {strategy_db_obj.name} with params: {custom_parameters}")
-                return {"status": "error", "message": "Invalid parameters for this strategy according to its validation logic."}
+            # Validate and get coerced parameters
+            validated_custom_parameters = getattr(StrategyClass, 'validate_parameters')(custom_parameters)
+            # If validation passes, proceed with validated_custom_parameters
+            # The validator raises ValueError on failure, so no need to check 'is_valid is False'
+            logger.info(f"Parameters validated successfully for strategy {strategy_db_obj.name}.")
+            custom_parameters_to_save = json.dumps(validated_custom_parameters)
         except ValueError as ve: # Catch specific validation errors from strategy
             logger.warning(f"Subscription creation/update: Parameter validation error for strategy {strategy_db_obj.name}: {ve}")
+            # Consider raising HTTPException here if this service directly handles HTTP responses
+            # e.g., raise HTTPException(status_code=400, detail=f"Invalid parameters: {ve}")
             return {"status": "error", "message": f"Invalid parameters: {ve}"}
         except Exception as e:
             logger.error(f"Subscription creation/update: Unexpected error during parameter validation for strategy {strategy_db_obj.name}: {e}", exc_info=True)
             return {"status": "error", "message": "An unexpected error occurred during parameter validation."}
     else:
-        # If no 'validate_parameters' method, check against default_parameters from DB if they exist and are structured for validation
-        # For now, we'll just log if no specific validator is present on the strategy class.
-        # More advanced: Could compare keys, types against strategy_db_obj.default_parameters (parsed JSON)
-        logger.info(f"Strategy {strategy_db_obj.name} has no 'validate_parameters' method. Proceeding with provided custom_parameters.")
+        logger.info(f"Strategy {strategy_db_obj.name} has no 'validate_parameters' method. Proceeding with provided custom_parameters as is.")
+        custom_parameters_to_save = json.dumps(custom_parameters) # Save original if no validator
 
 
     existing_sub = db_session.query(UserStrategySubscription).filter(
@@ -168,8 +170,8 @@ def create_or_update_strategy_subscription(db_session: Session, user_id: int, st
         new_expiry = start_from + datetime.timedelta(days=30 * subscription_months) 
         
         existing_sub.expires_at = new_expiry
-        existing_sub.is_active = True 
-        existing_sub.custom_parameters = json.dumps(custom_parameters)
+        existing_sub.is_active = True # Will be set by deploy_strategy logic
+        existing_sub.custom_parameters = custom_parameters_to_save # Use validated parameters
         existing_sub.status_message = "Subscription extended and active." # Reset status message
         subscribed_item = existing_sub
         action_message = "Subscription extended"
@@ -178,7 +180,7 @@ def create_or_update_strategy_subscription(db_session: Session, user_id: int, st
         new_expiry = now + datetime.timedelta(days=30 * subscription_months)
         new_subscription = UserStrategySubscription(
             user_id=user_id, strategy_id=strategy_db_id, api_key_id=api_key_id,
-            custom_parameters=json.dumps(custom_parameters),
+            custom_parameters=custom_parameters_to_save, # Use validated parameters
             is_active=False, # Start as inactive, deployment will activate
             subscribed_at=now, expires_at=new_expiry,
             status_message="Subscription created, pending deployment."
@@ -382,23 +384,20 @@ def update_user_subscription_parameters(db_session: Session, user_id: int, subsc
         return {"status": "error", "message": "Associated strategy not found. Cannot validate parameters."}
 
     StrategyClass = _load_strategy_class_from_db_obj(strategy_db_obj)
+    validated_new_custom_parameters = new_custom_parameters # Default to original if no validator
     if StrategyClass and hasattr(StrategyClass, 'validate_parameters') and callable(getattr(StrategyClass, 'validate_parameters')):
         try:
-            # The validate_parameters method should raise an exception for invalid params
-            # or return False. Let's assume it raises ValueError for this example.
-            is_valid = getattr(StrategyClass, 'validate_parameters')(new_custom_parameters)
-            if is_valid is False: # Explicitly check for False if it can return boolean
-                logger.warning(f"Update params: Validation failed for strategy {strategy_db_obj.name} with params: {new_custom_parameters}")
-                return {"status": "error", "message": "Invalid parameters for this strategy according to its validation logic."}
+            validated_new_custom_parameters = getattr(StrategyClass, 'validate_parameters')(new_custom_parameters)
+            logger.info(f"Parameters validated successfully for strategy {strategy_db_obj.name} during update.")
         except ValueError as ve: # Catch specific validation errors
             logger.warning(f"Update params: Parameter validation error for strategy {strategy_db_obj.name}: {ve}")
             return {"status": "error", "message": f"Invalid parameters: {ve}"}
         except Exception as e:
             logger.error(f"Update params: Unexpected error during parameter validation for strategy {strategy_db_obj.name}: {e}", exc_info=True)
-            # Depending on policy, might allow update or deny. For safety, deny.
             return {"status": "error", "message": "An unexpected error occurred during parameter validation."}
     else:
         logger.warning(f"Update params: Strategy {strategy_db_obj.name} has no 'validate_parameters' method. Skipping custom validation.")
+        # validated_new_custom_parameters remains as new_custom_parameters (original input)
 
     # Stop the current strategy task
     logger.info(f"Update params: Stopping strategy for subscription ID {subscription_id} (user {user_id}).")
@@ -416,7 +415,7 @@ def update_user_subscription_parameters(db_session: Session, user_id: int, subsc
 
     # Update custom_parameters and status_message
     try:
-        subscription.custom_parameters = json.dumps(new_custom_parameters)
+        subscription.custom_parameters = json.dumps(validated_new_custom_parameters) # Use validated
         subscription.status_message = "Parameters updated, preparing to restart strategy."
         # is_active should have been set to False by stop_strategy. If not, ensure it here.
         subscription.is_active = False 

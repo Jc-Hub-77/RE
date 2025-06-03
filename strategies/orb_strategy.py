@@ -30,6 +30,11 @@ class OpeningRangeBreakoutStrategy:
             "take_profit_pct_from_orb": {"type": "float", "label": "Take Profit % from ORB Level", "default": 1.5},
             "order_quantity_usd": {"type": "float", "label": "Order Quantity (USD Notional)", "default": 100.0},
             "leverage": {"type": "int", "label": "Leverage", "default": 10},
+            # New parameters
+            "session_eod_close_hour_local": {"type": "int", "default": 23, "min": 0, "max": 23, "label": "EOD Close Hour (Local)"},
+            "session_eod_close_minute_local": {"type": "int", "default": 59, "min": 0, "max": 59, "label": "EOD Close Minute (Local)"},
+            "order_fill_timeout_seconds": {"type": "int", "default": 60, "min": 10, "max": 300, "label": "Order Fill Timeout (s)"},
+            "order_fill_check_interval_seconds": {"type": "int", "default": 3, "min": 1, "max": 30, "label": "Order Fill Check Interval (s)"},
         }
 
     def __init__(self, db_session: Session, user_sub_obj: UserStrategySubscription, strategy_params: dict, exchange_ccxt, logger_obj=None): # Renamed logger
@@ -57,6 +62,12 @@ class OpeningRangeBreakoutStrategy:
         self.order_quantity_usd = Decimal(str(self.params.get("order_quantity_usd", "100.0")))
         self.leverage = int(self.params.get("leverage", 10))
 
+        # Initialize new parameters
+        self.session_eod_close_hour_local = int(self.params.get("session_eod_close_hour_local", 23))
+        self.session_eod_close_minute_local = int(self.params.get("session_eod_close_minute_local", 59))
+        self.order_fill_timeout_seconds = int(self.params.get("order_fill_timeout_seconds", 60))
+        self.order_fill_check_interval_seconds = int(self.params.get("order_fill_check_interval_seconds", 3))
+
         # ORB state
         self.orb_high: Optional[Decimal] = None
         self.orb_low: Optional[Decimal] = None
@@ -79,6 +90,74 @@ class OpeningRangeBreakoutStrategy:
         self._load_persistent_position_state()
         self._set_leverage()
         self.logger.info(f"{self.name} initialized for {self.trading_pair}, UserSubID {self.user_sub_obj.id}. PosID: {self.active_position_db_id}")
+
+    @classmethod
+    def validate_parameters(cls, params: dict) -> dict:
+        """Validates strategy-specific parameters."""
+        definition = cls.get_parameters_definition()
+        validated_params = {}
+        _logger = logging.getLogger(__name__) # Use a logger instance
+
+        for key, def_value in definition.items():
+            val_type_str = def_value.get("type")
+            choices = def_value.get("choices") 
+            min_val = def_value.get("min")
+            max_val = def_value.get("max")
+            default_val = def_value.get("default")
+
+            user_val = params.get(key)
+
+            if user_val is None: # Parameter not provided by user
+                if default_val is not None:
+                    user_val = default_val # Apply default
+                else:
+                    raise ValueError(f"Required parameter '{key}' is missing and has no default.")
+            
+            # Type checking and coercion
+            if val_type_str == "int":
+                try:
+                    user_val = int(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be an integer. Got: {user_val}")
+            elif val_type_str == "float":
+                try:
+                    user_val = float(user_val)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Parameter '{key}' must be a float. Got: {user_val}")
+            elif val_type_str == "str": 
+                if not isinstance(user_val, str):
+                    raise ValueError(f"Parameter '{key}' must be a string. Got: {user_val}")
+                # Specific validation for timezone string if desired
+                if key == "orb_candle_timezone":
+                    try:
+                        pytz.timezone(user_val)
+                    except pytz.exceptions.UnknownTimeZoneError:
+                        raise ValueError(f"Invalid timezone string for '{key}': {user_val}")
+            elif val_type_str == "bool": # Not used in this strategy's definition
+                if not isinstance(user_val, bool):
+                    if str(user_val).lower() in ['true', 'yes', '1']: user_val = True
+                    elif str(user_val).lower() in ['false', 'no', '0']: user_val = False
+                    else: raise ValueError(f"Parameter '{key}' must be a boolean. Got: {user_val}")
+            
+            # Choice validation
+            if choices and user_val not in choices:
+                raise ValueError(f"Parameter '{key}' value '{user_val}' is not in valid choices: {choices}")
+            
+            # Min/Max validation
+            if val_type_str in ["int", "float"]:
+                if min_val is not None and user_val < min_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is less than min {min_val}.")
+                if max_val is not None and user_val > max_val:
+                    raise ValueError(f"Parameter '{key}' value {user_val} is greater than max {max_val}.")
+            
+            validated_params[key] = user_val
+
+        # Check for unknown parameters
+        for key_param in params:
+            if key_param not in definition:
+                _logger.warning(f"Unknown parameter '{key_param}' provided for {cls.__name__}. It will be ignored.")
+        
+        return validated_params
 
     def _reset_sl_tp_state(self):
         self.active_sl_tp_exchange_ids = {}
@@ -224,9 +303,35 @@ class OpeningRangeBreakoutStrategy:
         except Exception as e: self.logger.error(f"Error fetching ORB candle: {e}", exc_info=True)
         self._reset_daily_orb_state(); return False
         
-    def _await_order_fill(self, exchange_order_id: str): # Simplified signature
-        # Same as original, but use self.exchange_ccxt and self.trading_pair
-        return super()._await_order_fill(self.exchange_ccxt, exchange_order_id, self.trading_pair) if hasattr(super(), '_await_order_fill') else None # Fallback if not inherited
+    def _await_order_fill(self, exchange_order_id: str) -> Optional[Dict]: # Added return type hint
+        # Using instance parameters for timeout and interval
+        start_time = time.time() # Ensure 'time' is imported as 'time' not 'datetime.time'
+        self.logger.info(f"[{self.name}-{self.trading_pair}] Awaiting fill for order {exchange_order_id} (timeout: {self.order_fill_timeout_seconds}s)")
+        while time.time() - start_time < self.order_fill_timeout_seconds:
+            try:
+                order = self.exchange_ccxt.fetch_order(exchange_order_id, self.trading_pair)
+                if order['status'] == 'closed':
+                    self.logger.info(f"Order {exchange_order_id} filled.")
+                    return order
+                elif order['status'] in ['canceled', 'rejected', 'expired']:
+                    self.logger.warning(f"Order {exchange_order_id} is {order['status']}. Not waiting further.")
+                    return order
+                self.logger.info(f"Order {exchange_order_id} status is {order['status']}. Attempt "
+                                 f"{int((time.time() - start_time) / self.order_fill_check_interval_seconds) + 1}"
+                                 f"/{int(self.order_fill_timeout_seconds / self.order_fill_check_interval_seconds)}. Waiting...")
+                time.sleep(self.order_fill_check_interval_seconds)
+            except ccxt.OrderNotFound:
+                self.logger.warning(f"Order {exchange_order_id} not found. Retrying.")
+            except Exception as e:
+                self.logger.error(f"Error fetching order {exchange_order_id}: {e}. Retrying.", exc_info=True)
+        self.logger.warning(f"Timeout for order {exchange_order_id}. Final check.")
+        try:
+            final_status = self.exchange_ccxt.fetch_order(exchange_order_id, self.trading_pair)
+            self.logger.info(f"Final status for order {exchange_order_id}: {final_status['status']}")
+            return final_status
+        except Exception as e:
+            self.logger.error(f"Final check for order {exchange_order_id} failed: {e}", exc_info=True)
+        return None
 
     def _place_order(self, order_type: str, side: str, quantity: Decimal, price: Optional[Decimal]=None, params: Optional[Dict]=None) -> Optional[Order]:
         db_order = None
@@ -377,13 +482,13 @@ class OpeningRangeBreakoutStrategy:
             else: self.logger.error("Failed to place ORB entry order or create DB record.")
 
     def _perform_eod_close_if_needed(self, current_utc_dt: datetime):
-        # Check if it's EOD in the ORB candle's timezone, e.g., 1 minute before midnight
-        target_eod_local_time = time(23, 59, 0) 
+        # Check if it's EOD in the ORB candle's timezone
+        target_eod_local_time = time(self.session_eod_close_hour_local, self.session_eod_close_minute_local, 0)
         current_candle_tz_datetime = current_utc_dt.astimezone(self.orb_candle_tz)
 
         if current_candle_tz_datetime.time() >= target_eod_local_time:
             if self.active_position_db_id:
-                self.logger.info(f"[{self.name}-{self.trading_pair}] EOD detected in {self.orb_candle_timezone_str}. Closing active position {self.active_position_db_id}.")
+                self.logger.info(f"[{self.name}-{self.trading_pair}] EOD detected in {self.orb_candle_timezone_str} at or after {target_eod_local_time.strftime('%H:%M')}. Closing active position {self.active_position_db_id}.")
                 self._cancel_active_sl_tp_orders() # Cancel SL/TP first
                 
                 # Fetch current price for closing PnL estimation (market order will fill at varying price)
