@@ -105,6 +105,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if(platformPlanExpiry) platformPlanExpiry.textContent = sub.expires_at ? new Date(sub.expires_at).toLocaleDateString() : "N/A";
                 if(renewPlatformSubBtn) {
                     renewPlatformSubBtn.style.display = 'inline-block'; // Make it visible
+                    // FIXME: Platform subscription renewal details (plan ID, item name, type, description, price, months)
+                    // are hardcoded here. These should ideally be fetched from a backend API
+                    // that provides available platform subscription plans and their current pricing.
+                    // The existing NOTE comment also highlights this.
                     // NOTE: Platform subscription renewal options are currently hardcoded below.
                     // For dynamic platform tiers, a backend endpoint providing these options would be needed.
                     renewPlatformSubBtn.dataset.itemId = sub.plan_id || "platform_basic_annual"; // Example plan ID

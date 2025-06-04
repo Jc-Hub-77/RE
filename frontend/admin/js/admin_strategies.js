@@ -68,7 +68,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     deleteButton.style.marginLeft = '5px';
                     deleteButton.onclick = () => handleDeleteStrategy(strategy.id, strategy.name);
                     actionsCell.appendChild(deleteButton);
-                    // TODO for delete: Backend endpoint for DELETE /api/v1/admin/strategies/{strategy_id} needs to be implemented.
                 });
             } else {
                 throw new Error(data.message || "Failed to parse strategies list.");
@@ -238,13 +237,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!confirm(`Are you sure you want to DELETE strategy ID ${strategyId} (${strategyName})? This action cannot be undone.`)) return;
         
         // Placeholder for backend API call, as DELETE endpoint might not exist yet.
-        console.warn(`Attempting to delete strategy ID ${strategyId}. Backend DELETE endpoint needs to be implemented.`);
-        alert(`Simulated delete for strategy ID ${strategyId}. Implement backend DELETE /api/v1/admin/strategies/${strategyId}`);
+        // console.warn(`Attempting to delete strategy ID ${strategyId}. Backend DELETE endpoint needs to be implemented.`);
+        // alert(`Simulated delete for strategy ID ${strategyId}. Implement backend DELETE /api/v1/admin/strategies/${strategyId}`);
         
-        // Example of what the call would look like if endpoint exists:
-        /*
+        // Actual call to the implemented backend endpoint:
         try {
-            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/strategies/${strategyId}`, {
+            const response = await fetch(`${window.BACKEND_API_BASE_URL}/api/v1/admin/managed-strategies/${strategyId}`, {
                 method: 'DELETE',
                 headers: { 'Authorization': `Bearer ${authToken}` }
             });
@@ -254,16 +252,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // If response is 204 No Content, there might not be a JSON body
             if (response.status === 204) {
-                 alert(`Strategy ID ${strategyId} deleted successfully.`);
+                 alert(`Strategy ID ${strategyId} (${strategyName}) deleted successfully.`);
             } else {
                 const result = await response.json();
-                alert(result.message || `Strategy ID ${strategyId} deleted successfully.`);
+                alert(result.message || `Strategy ID ${strategyId} (${strategyName}) deleted successfully.`);
             }
             fetchAdminStrategies(); // Refresh the list
         } catch (error) {
             console.error(`Error deleting strategy ${strategyId}:`, error);
             alert(`Error: ${error.message}`);
         }
-        */
     }
 });

@@ -109,6 +109,27 @@ async def admin_update_managed_strategy( # Renamed function for clarity
         return JSONResponse(status_code=status.HTTP_200_OK, content=result)
     return result
 
+@router.delete("/managed-strategies/{strategy_id}", response_model=user_schemas.GeneralResponse, dependencies=[Depends(get_current_active_admin_user)])
+async def admin_delete_managed_strategy(
+    strategy_id: int,
+    db: Session = Depends(get_db)
+):
+    #"""
+    #Admin endpoint to delete a strategy.
+    #"""
+    result = admin_service.delete_strategy_admin(db_session=db, strategy_id=strategy_id)
+
+    if result.get("status") == "error":
+        if "not found" in result.get("message", "").lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result["message"])
+        else:
+            # For other errors, like "strategy has active subscriptions"
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
+
+    # On success, service returns {"status": "success", "message": "Strategy deleted successfully."}
+    # This matches GeneralResponse.
+    return result
+
 # --- Admin Subscription Management Endpoints ---
 @router.get("/all-subscriptions", response_model=admin_schemas.AdminSubscriptionListResponse, dependencies=[Depends(get_current_active_admin_user)])
 async def admin_list_all_subscriptions(

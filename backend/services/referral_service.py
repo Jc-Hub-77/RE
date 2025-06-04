@@ -316,5 +316,3 @@ def admin_get_referral_payout_history(db_session: Session, page: int = 1, per_pa
         "per_page": per_page,
         "total_pages": total_pages
     }
-
-# TODO: Function for admin to adjust commission rates or referral program settings (if stored in DB)

@@ -347,8 +347,8 @@ def forgot_password_request(db_session: Session, email: str):
         # Still return success to prevent email enumeration
         return {"status": "success", "message": "If an account with this email exists, a password reset link has been sent."}
 
-    plain_token, expires_at = _generate_secure_token_data(1) # Password reset token expiry set to 1 hour.
-                                                              # This duration could be made configurable via settings if needed.
+    # Use the configurable expiry from settings
+    plain_token, expires_at = _generate_secure_token_data(settings.PASSWORD_RESET_TOKEN_EXPIRE_HOURS)
     user.password_reset_token = _get_password_hash(plain_token) # Store the hashed token
     user.password_reset_token_expires_at = expires_at
     
@@ -360,7 +360,7 @@ def forgot_password_request(db_session: Session, email: str):
             f"Hi {user.username},\n\n"
             f"You requested a password reset. Click the link below to reset your password:\n"
             f"{reset_link}\n\n"
-            f"This link will expire in 1 hour. If you did not request this, please ignore this email.\n\n"
+            f"This link will expire in {settings.PASSWORD_RESET_TOKEN_EXPIRE_HOURS} hour(s). If you did not request this, please ignore this email.\n\n" # Updated message
             f"Thanks,\nThe {settings.PROJECT_NAME} Team"
         )
         send_email_task.delay(user.email, email_subject, email_body)
@@ -460,6 +460,46 @@ def request_new_verification_email(db_session: Session, email: str):
         db_session.rollback()
         logger.error(f"Error resending verification email for {email}: {e}", exc_info=True)
         return {"status": "error", "message": "Database error resending verification email."}
+
+def get_user_performance_summary(db_session: Session, user_id: int):
+    #"""
+    #Placeholder for fetching user performance summary.
+    #Actual implementation would query trades, P&L, etc.
+    #"""
+    logger.warning(f"Placeholder function 'get_user_performance_summary' called for user_id: {user_id}. Returning dummy data.")
+    # Ensure this response structure matches UserPerformanceSummaryResponse schema
+    return {
+        "status": "success", # Using success so frontend might attempt to display
+        "message": "Performance summary data is currently a placeholder.",
+        "user_id": user_id,
+        "overall_pnl_30d": 0.00,
+        "active_bots_count": 0,
+        "win_rate_30d": 0.0,
+        "total_trades_30d": 0
+        # Add other fields as defined in UserPerformanceSummaryResponse schema with default/dummy values
+    }
+
+def get_user_platform_subscription(db_session: Session, user_id: int):
+    #"""
+    #Placeholder for fetching user's platform-wide subscription details.
+    #Actual implementation would check against a platform subscription model or similar.
+    #"""
+    logger.warning(f"Placeholder function 'get_user_platform_subscription' called for user_id: {user_id}. Returning dummy data.")
+    # Ensure this response structure matches UserPlatformSubscriptionResponse schema
+    # Dummy data for one month from now
+    dummy_expiry_date = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    return {
+        "status": "success", # Using success so frontend might attempt to display
+        "message": "Platform subscription data is currently a placeholder.",
+        "user_id": user_id,
+        "subscription": {
+            "plan_name": "Placeholder Basic Plan",
+            "is_active": True,
+            "expires_at": dummy_expiry_date.isoformat(),
+            "permissions": ["basic_platform_access"]
+            # Ensure other fields from UserPlatformSubscription (the inner 'subscription' object in the response schema) are present
+        }
+    }
 
 # `manage_security_settings` placeholder - kept for conceptual completeness from original file
 def manage_security_settings(user_id: int, settings_data: dict): # Added type hints for clarity

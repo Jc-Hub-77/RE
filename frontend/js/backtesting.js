@@ -324,7 +324,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         metricsSummaryContainer.innerHTML = `<p class="error-message">Backtest ${results.status}: ${results.status_message || "No further details."}</p>`;
                     }
                 } else if (results.status === "running" || results.status === "queued") {
-                    resultsLoading.textContent = `Backtest is ${results.status}. Polling... (Attempt ${attempts}/${maxAttempts})`;
+                    resultsLoading.textContent = `Backtest is ${results.status}. Polling... (Attempt ${attempts}/${BACKTEST_MAX_POLL_ATTEMPTS})`;
                 } else { 
                     clearInterval(intervalId);
                     resultsLoading.style.display = 'none';

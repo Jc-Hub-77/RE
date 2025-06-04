@@ -27,6 +27,7 @@ class Settings:
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 48
+    PASSWORD_RESET_TOKEN_EXPIRE_HOURS: int = int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_HOURS", "1"))
 
     # API Key Encryption Key (for encrypting sensitive exchange API keys)
     # This key is used to encrypt sensitive data like external API keys stored by users.
