@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError # Added for DB errors
 from backend.celery_app import celery_app # Import celery app
 from backend.tasks import run_backtest_task # Import the Celery task
+from backend.models import BacktestResult, Strategy as StrategyModel, User # Added User for potential joins
+from sqlalchemy import desc # Added for ordering
+from typing import Optional, Dict, Any, List # Ensure these are imported
+
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -325,3 +329,90 @@ def run_backtest(db_session: Session, # Use DB session directly
 # secrets management system (e.g., environment variables injected from HashiCorp Vault, 
 # AWS Secrets Manager, Azure Key Vault, or similar) and is NOT hardcoded or committed to version control.
 # While this service is for backtesting, API_ENCRYPTION_KEY is a system-wide concern.
+
+def get_backtest_result_by_id(db: Session, backtest_id: int, user_id: Optional[int] = None) -> Dict[str, Any]:
+    #"""
+    #Retrieves a specific backtest result by its ID.
+    #If user_id is provided, it also ensures the backtest belongs to that user.
+    #"""
+    query = db.query(BacktestResult).filter(BacktestResult.id == backtest_id)
+    if user_id is not None:
+        query = query.filter(BacktestResult.user_id == user_id)
+
+    result = query.first()
+
+    if not result:
+        logger.warning(f"Backtest result ID {backtest_id} not found {'for user ' + str(user_id) if user_id else ''}.")
+        return {"status": "error", "message": "Backtest result not found or access denied."}
+
+    # Serialize the result. Assuming BacktestResultResponse schema expects these fields.
+    # Adjust serialization as needed based on the actual Pydantic schema.
+    serialized_result = {
+        "id": result.id,
+        "user_id": result.user_id,
+        "strategy_name_used": result.strategy_name_used,
+        "custom_parameters_json": result.custom_parameters_json, # Keep as JSON string
+        "start_date": result.start_date.isoformat() if result.start_date else None,
+        "end_date": result.end_date.isoformat() if result.end_date else None,
+        "timeframe": result.timeframe,
+        "symbol": result.symbol,
+        "pnl": result.pnl,
+        "sharpe_ratio": result.sharpe_ratio,
+        "max_drawdown": result.max_drawdown,
+        "total_trades": result.total_trades,
+        "winning_trades": result.winning_trades,
+        "losing_trades": result.losing_trades,
+        "trades_log_json": result.trades_log_json, # Keep as JSON string
+        "equity_curve_json": result.equity_curve_json, # Keep as JSON string
+        "status": result.status,
+        "celery_task_id": result.celery_task_id,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
+    }
+    logger.info(f"Retrieved backtest result ID {backtest_id} {'for user ' + str(user_id) if user_id else ''}.")
+    return {"status": "success", "result": serialized_result}
+
+
+def list_backtest_results(db: Session, user_id: Optional[int] = None, page: int = 1, per_page: int = 20) -> Dict[str, Any]:
+    #"""
+    #Lists backtest results with pagination.
+    #If user_id is provided, filters results for that user. Otherwise, lists all (for admin).
+    #"""
+    query = db.query(BacktestResult)
+    if user_id is not None:
+        query = query.filter(BacktestResult.user_id == user_id)
+
+    total_items = query.count()
+
+    results_page = query.order_by(desc(BacktestResult.created_at)) \
+                        .offset((page - 1) * per_page) \
+                        .limit(per_page) \
+                        .all()
+
+    serialized_list = []
+    for result in results_page:
+        serialized_list.append({
+            "id": result.id,
+            "user_id": result.user_id,
+            "strategy_name_used": result.strategy_name_used,
+            "symbol": result.symbol,
+            "timeframe": result.timeframe,
+            "start_date": result.start_date.isoformat() if result.start_date else None,
+            "end_date": result.end_date.isoformat() if result.end_date else None,
+            "pnl": result.pnl,
+            "status": result.status,
+            "created_at": result.created_at.isoformat() if result.created_at else None,
+            "updated_at": result.updated_at.isoformat() if result.updated_at else None,
+        })
+
+    total_pages = (total_items + per_page - 1) // per_page if per_page > 0 else 0
+
+    logger.info(f"Listed backtest results page {page} {'for user ' + str(user_id) if user_id else '(all users)'}. Found {total_items} total.")
+    return {
+        "status": "success",
+        "results": serialized_list,
+        "total_items": total_items,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages
+    }

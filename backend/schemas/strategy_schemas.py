@@ -127,3 +127,19 @@ class AdminBacktestListResponse(BaseModel):
     status: str
     backtests: List[BacktestResultResponse] # Assuming admin list returns full results
     # Could add pagination/total fields if the service layer supports it
+
+class BacktestRunRequest(BaseModel):
+    strategy_db_id: int
+    custom_parameters: Dict[str, Any]
+    symbol: str
+    timeframe: str
+    start_date_str: str # Keeping as string for simplicity, service layer handles parsing
+    end_date_str: str   # Keeping as string
+    initial_capital: Optional[float] = 10000.0
+    exchange_id: Optional[str] = 'binance'
+
+class BacktestRunResponse(BaseModel):
+    status: str
+    message: str
+    backtest_id: Optional[int] = None
+    task_id: Optional[str] = None

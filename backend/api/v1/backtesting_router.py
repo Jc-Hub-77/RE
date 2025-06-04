@@ -1,9 +1,11 @@
 # backend/api/v1/backtesting_router.py
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import Dict, Any
+from typing import Any # Changed from Dict, Any
 
-from ...schemas import strategy_schemas
+from ...schemas import strategy_schemas # Keep this as is
+# Import the new schemas directly
+from ...schemas.strategy_schemas import BacktestRunRequest, BacktestRunResponse
 from ...services import backtesting_service
 from backend.models import User
 from backend.db import get_db
@@ -12,37 +14,31 @@ from .admin_router import get_current_active_admin_user # Import admin dependenc
 
 router = APIRouter()
 
-@router.post("/backtests", response_model=Dict[str, Any]) # Define a more specific response model if possible
+@router.post("/backtests", response_model=BacktestRunResponse) # Use the new response model
 async def run_backtest_endpoint(
-    backtest_params: strategy_schemas.UserStrategySubscriptionCreateRequest, # Re-use the subscription request
-    start_date: str,
-    end_date: str,
-    symbol: str, # Make symbol configurable
-    timeframe: str, # Make timeframe configurable
-    initial_capital: float = 10000.0,
-    exchange_id: str = 'binance',
+    payload: BacktestRunRequest, # Use the new request schema for the payload
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Runs a backtest for a given strategy.
+    Runs a backtest for a given strategy using parameters from the request body.
     """
-    # The UserStrategySubscriptionCreateRequest already contains strategy_id, api_key_id, custom_parameters
-    # We can pass these directly to the backtesting service.
     result = backtesting_service.run_backtest(
         db_session=db,
         user_id=current_user.id,
-        strategy_id=backtest_params.strategy_db_id,
-        custom_parameters=backtest_params.custom_parameters,
-        symbol=symbol, # Use the configurable symbol
-        timeframe=timeframe, # Use the configurable timeframe
-        start_date_str=start_date,
-        end_date_str=end_date,
-        initial_capital=initial_capital,
-        exchange_id=exchange_id
+        strategy_id=payload.strategy_db_id, # strategy_id from payload
+        custom_parameters=payload.custom_parameters,
+        symbol=payload.symbol,
+        timeframe=payload.timeframe,
+        start_date_str=payload.start_date_str,
+        end_date_str=payload.end_date_str,
+        initial_capital=payload.initial_capital,
+        exchange_id=payload.exchange_id
     )
     if result["status"] == "error":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
+
+    # The service returns a dict that should match BacktestRunResponse fields
     return result
 
 @router.get("/backtests/{backtest_id}", response_model=strategy_schemas.BacktestResultResponse) # Define a specific response model
@@ -62,12 +58,20 @@ async def get_user_backtest_result(
 @router.get("/admin/backtests", response_model=strategy_schemas.AdminBacktestListResponse, dependencies=[Depends(get_current_active_admin_user)]) # Define a specific response model
 async def admin_list_all_backtest_results(
     db: Session = Depends(get_db),
+    page: int = Query(1, alias="page", ge=1),
+    per_page: int = Query(20, alias="per_page", ge=1, le=100)
     # Add pagination/filtering/sorting queries if needed
 ):
     """
     Admin endpoint to list all backtest results.
     """
-    result = backtesting_service.list_all_backtest_results(db)
+    # Call the new generic list_backtest_results with user_id=None for admin view
+    result = backtesting_service.list_backtest_results(
+        db=db,
+        user_id=None,
+        page=page,
+        per_page=per_page
+    )
     if result["status"] == "error": # Should not happen if service layer is robust
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message", "Error listing backtest results"))
     return result

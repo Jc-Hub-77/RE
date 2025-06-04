@@ -88,28 +88,30 @@ async def stop_live_strategy(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
     return result
 
-@router.get("/strategies/status", response_model=live_trading_schemas.RunningStrategiesResponse)
+@router.get("/strategies/status", response_model=live_trading_schemas.RunningStrategiesResponse) # Ensure live_trading_schemas is imported
 async def get_running_strategies_status(
-    db: Session = Depends(get_db), # db might be used by service in future
-    current_user: User = Depends(get_current_active_user) # Auth for this endpoint
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
 ):
-    """
-    Gets the status of all running strategies. (Currently placeholder, might be restricted or enhanced)
-    """
-    result = live_trading_service.get_running_strategies_status() # db not used by current service func
+    #"""
+    #Gets the status of running strategies for the currently authenticated user.
+    #"""
+    # Pass current_user.id to filter for the user's strategies
+    result = live_trading_service.get_running_strategies_status(db=db, user_id=current_user.id)
     return result
 
 
 # --- Admin-only Endpoints for Live Strategy Management ---
 
-@router.get("/admin/running-strategies", response_model=live_trading_schemas.RunningStrategiesResponse, dependencies=[Depends(get_current_active_admin_user)])
+@router.get("/admin/running-strategies", response_model=live_trading_schemas.RunningStrategiesResponse, dependencies=[Depends(get_current_active_admin_user)]) # Ensure get_current_active_admin_user is imported
 async def admin_list_running_strategies(
     db: Session = Depends(get_db) 
 ):
-    """
-    Admin endpoint to list all currently running live strategies.
-    """
-    return live_trading_service.get_running_strategies_status()
+    #"""
+    #Admin endpoint to list all currently running live strategies.
+    #"""
+    # Call without user_id to get all strategies
+    return live_trading_service.get_running_strategies_status(db=db)
 
 @router.post("/admin/subscriptions/{user_strategy_subscription_id}/force-stop", response_model=live_trading_schemas.StrategyActionResponse, dependencies=[Depends(get_current_active_admin_user)])
 async def admin_force_stop_live_strategy(
