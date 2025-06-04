@@ -17,6 +17,9 @@ This document provides a checklist of crucial considerations and recommendations
     - Payment gateway keys.
     - `STRATEGIES_DIR` pointing to the correct location.
     - `FRONTEND_URL` and `ALLOWED_ORIGINS` for CORS.
+- [ ] **Password Reset Token Expiry:** Confirm `PASSWORD_RESET_TOKEN_EXPIRE_HOURS` (environment variable, defaulting to 1 hour if not set) is set to an appropriate duration for your security policy.
+- [ ] **Strategies Directory (`STRATEGIES_DIR`):** Verify this environment variable points to a persistent, secure, and **absolute path** on the server where strategy files are located. This is critical if strategies are managed outside the Docker image or on a Windows host.
+- [ ] **Runtime Configuration Checks (Celery):** For critical services like Celery, ensure that essential configurations (e.g., `REDIS_URL` in `celery_app.py`) are not using placeholder values in a production environment. Consider adding runtime validation checks if not already present (similar to those in `config.py` for other settings).
 - [ ] **Strategy `payment_options_json` Field:** Understand and correctly configure the `payment_options_json` field for each `Strategy` model instance. This field is critical for defining subscription tiers.
     *   **Format:** It must be a valid JSON string representing a list of payment options.
     *   **Structure:** Each item in the list is an object with the following keys:
@@ -35,10 +38,12 @@ This document provides a checklist of crucial considerations and recommendations
 - [ ] **Frontend API URL:** Ensure `frontend/js/config.js` has `window.BACKEND_API_BASE_URL = "";` if serving frontend and backend API via a reverse proxy on the same domain.
 - [ ] **Nginx/Reverse Proxy:** Implement Nginx (or similar) as a reverse proxy to:
     - Serve the static frontend files.
-    - Proxy API requests to the backend (e.g., `127.0.0.1:8000` as configured in `docker-compose.prod.yml`).
+    - Proxy API requests to the backend (e.g., `127.0.0.1:8000` as configured in `docker-compose.prod.yml`, or `web:8000` if Nginx is also a Docker container).
     - Implement SSL/TLS for HTTPS (e.g., using Let's Encrypt).
     - Optionally, add security headers, caching rules.
-- [ ] **System Settings Configuration:** Critical backend defaults (e.g., for live strategy execution parameters like symbol/timeframe which are now mandatory, and backtesting default settings like `MAX_BACKTEST_DAYS_SYSTEM`, `DEFAULT_BACKTEST_EXCHANGE_ID`, `DEFAULT_BACKTEST_INITIAL_CAPITAL`) are now primarily managed via `SystemSetting` database entries. This reduces hardcoded fallbacks and allows for dynamic configuration via the admin panel. Ensure these are reviewed and set appropriately for the production environment.
+- [ ] **System Settings Configuration:** Critical backend defaults (e.g., for live strategy execution parameters, backtesting default settings like `MAX_BACKTEST_DAYS_SYSTEM`, `DEFAULT_BACKTEST_EXCHANGE_ID`, `DEFAULT_BACKTEST_INITIAL_CAPITAL`, and `REFERRAL_COMMISSION_RATE`) are primarily managed via `SystemSetting` database entries or environment variables. Review these in `config.py` and the admin panel to ensure they are appropriate for production.
+- [ ] **Windows Docker Desktop Considerations:** If deploying on Windows using Docker Desktop, ensure Docker Desktop is allocated sufficient resources (CPU, RAM, Disk) via its settings, especially when using the WSL 2 backend. Verify Windows Firewall rules allow access to ports exposed by Docker containers.
+- [ ] **Review Frontend Configuration:** Ensure platform-specific configurations (e.g., platform subscription pricing in `frontend/js/subscription.js`, currently hardcoded and marked with `FIXME`) are moved to backend/dynamic configuration where appropriate for production.
 
 ## II. Automated Testing
 - [ ] **Write Comprehensive Tests:** The project is set up with `pytest` (`backend/tests/`). It is CRITICAL to write comprehensive automated tests:
@@ -76,8 +81,10 @@ This document provides a checklist of crucial considerations and recommendations
 - [ ] **Store Raw Payment Gateway Metadata:** The `PaymentTransaction` model now includes a `gateway_metadata_json: Text` field. This field stores the raw JSON metadata received from the payment gateway (e.g., during charge creation or via webhooks). This is crucial for robust debugging, manual recovery processes, and detailed payment analysis, reducing reliance on parsing such data from the `description` field.
 
 ## VI. Scalability & Reliability
-- [ ] **Load Testing:** Conduct load testing to understand performance bottlenecks and determine appropriate scaling for Gunicorn workers, Celery workers, and database resources.
-- [ ] **Horizontal Scaling:** Be prepared to scale web and worker services horizontally (running more containers) based on load.
+- [ ] **Review Scalability Guide:** Consult `SCALABILITY_AND_PERFORMANCE.MD` for detailed guidance on resource estimation, Docker scaling strategies, performance tuning, and considerations for handling ~5000 concurrent users.
+- [ ] **Load Testing:** Conduct load testing to understand performance bottlenecks and determine appropriate scaling for Gunicorn workers, Celery workers, and database resources, as outlined in the scalability guide.
+- [ ] **Horizontal Scaling:** Be prepared to scale web and worker services horizontally (running more containers) based on load, as discussed in `SCALABILITY_AND_PERFORMANCE.MD`.
+- [ ] **Database & Redis Scaling:** For high-load scenarios, consider using external/managed PostgreSQL and Redis services instead of running them within Docker on the same VPS to improve scalability, reliability, and manageability. (See `SCALABILITY_AND_PERFORMANCE.MD`)
 - [ ] **Database Read Replicas:** For read-heavy workloads, consider using database read replicas.
 - [ ] **Data Redundancy & Failover:** Plan for data redundancy and service failover.
 

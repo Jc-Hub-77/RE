@@ -160,7 +160,9 @@ This project includes Dockerfiles and a `docker-compose.yml` configuration to si
     This order is correctly reflected in the `down_revision` pointers within the migration files.
 
 5.  **Deploy Web Server & Workers:** Deploy your containerized application using your chosen orchestration platform (e.g., Kubernetes, Docker Swarm, AWS ECS, Google Cloud Run/GKE, Azure Kubernetes Service). Configure the number of replicas for web and worker services based on expected load.
-6.  **Deploy Frontend:** Serve the static files from the `frontend/` directory using a web server (e.g., Nginx) or a static site hosting service. Configure it to proxy API requests to the backend Web Server.
+6.  **Deploy Frontend:** Serve the static files from the `frontend/` directory using a web server (e.g., Nginx) or a static site hosting service. Configure it to proxy API requests to the backend Web Server. This can be achieved by using a dedicated web server container (e.g., Nginx) within your Docker setup or by configuring a web server (like Nginx or IIS) on the host machine. See `INSTALLATION_GUIDE.MD` for specific examples.
 7.  **Set Up Monitoring & Logging:** Implement solutions for centralized logging and monitoring of all components.
+
+For a detailed guide on deploying all components (including a containerized frontend proxy) on a single VPS using Docker Compose (applicable to both Linux and Windows with Docker Desktop), please refer to the `INSTALLATION_GUIDE.MD`.
 
 This document provides a high-level overview. Detailed deployment steps will vary based on the chosen hosting environment and infrastructure.
