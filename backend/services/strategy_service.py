@@ -19,14 +19,8 @@ from fastapi import HTTPException # Added for parameter validation, though will 
 # Initialize logger
 logger = logging.getLogger(__name__)
 
-# Path to the directory where strategy .py files are stored.
-# Adjust this path if your strategies are located elsewhere relative to this service file.
-# Example: If 'services' is in 'backend/services' and strategies in 'backend/strategies', then '..' is correct.
-# If strategies are in a top-level 'strategies' folder: os.path.join(os.path.dirname(__file__), '..', '..', 'strategies')
-STRATEGIES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'strategies')
-# Ensure this path is correct and accessible by the application.
-# Consider making this configurable via settings.STRATEGIES_DIR for flexibility.
-
+# STRATEGIES_DIR is now primarily sourced from settings.STRATEGIES_DIR.
+# The utils._load_strategy_class_from_db_obj function will use settings.STRATEGIES_DIR.
 
 def list_available_strategies(db_session: Session) -> Dict[str, Any]:
     """Lists all active strategies available to users from the database."""
