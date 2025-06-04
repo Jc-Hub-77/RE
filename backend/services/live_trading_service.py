@@ -6,6 +6,7 @@ import json
 import os
 import importlib.util
 import logging
+from typing import Optional # Ensure Optional is imported
 # import datetime # Already imported below, ensure only one
 from celery.result import AsyncResult
 from celery.exceptions import OperationalError as CeleryOperationalError # For Celery specific operational errors
@@ -213,21 +214,28 @@ def restart_strategy_admin(db: Session, user_strategy_subscription_id: int):
     return {"status": "success", "message": final_message, "task_id": deploy_result.get("task_id")}
 
 
-def get_running_strategies_status(db: Session):
-    """
-    Retrieves the status of all active strategy subscriptions that have a Celery task ID.
-    """
-    logger.info("Fetching status of running strategies...")
+def get_running_strategies_status(db: Session, user_id: Optional[int] = None): # Add user_id parameter
+    #"""
+    #Retrieves the status of all active strategy subscriptions that have a Celery task ID.
+    #If user_id is provided, filters for that user. Otherwise, retrieves for all users (admin view).
+    #"""
+    logger.info(f"Fetching status of running strategies... (User ID: {user_id if user_id else 'All'})")
     
-    active_subscriptions_with_tasks = db.query(UserStrategySubscription).filter(
+    query = db.query(UserStrategySubscription).filter(
         UserStrategySubscription.is_active == True,
         UserStrategySubscription.celery_task_id != None
-    ).all()
+    )
+
+    if user_id is not None:
+        query = query.filter(UserStrategySubscription.user_id == user_id)
+
+    active_subscriptions_with_tasks = query.all()
 
     statuses = []
     if not active_subscriptions_with_tasks:
-        logger.info("No active subscriptions with Celery tasks found.")
-        return {"status": "success", "running_strategies": [], "message": "No active strategies with tasks."}
+        message = f"No active subscriptions with Celery tasks found{' for user ' + str(user_id) if user_id else ''}."
+        logger.info(message)
+        return {"status": "success", "running_strategies": [], "message": message}
 
     for sub in active_subscriptions_with_tasks:
         try:
@@ -243,7 +251,7 @@ def get_running_strategies_status(db: Session):
                 "task_status": task.state,
                 "task_info": task.info if isinstance(task.info, dict) else str(task.info), # Ensure info is serializable
                 "db_status_message": sub.status_message,
-                "last_updated_db": sub.updated_at.isoformat() if sub.updated_at.isoformat() else None,
+                "last_updated_db": sub.updated_at.isoformat() if sub.updated_at else None,
             }
             statuses.append(status_info)
             logger.debug(f"Status for Sub ID {sub.id} ('{strategy_name}'): Task ID {sub.celery_task_id}, State: {task.state}")
@@ -265,7 +273,7 @@ def get_running_strategies_status(db: Session):
             })
 
 
-    logger.info(f"Successfully fetched status for {len(statuses)} running strategies.")
+    logger.info(f"Successfully fetched status for {len(statuses)} running strategies {'for user ' + str(user_id) if user_id else '(all users)'}.")
     return {"status": "success", "running_strategies": statuses}
 
 
