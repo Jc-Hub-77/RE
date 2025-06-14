@@ -1,0 +1,61 @@
+# Use an official Python runtime as a parent image
+FROM python:3.10-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Set the Python path to include the backend directory
+ENV PYTHONPATH=/app/backend
+
+# Set the Alembic configuration file path
+ENV ALEMBIC_CONFIG=/app/backend/alembic.ini
+# Explicitly set Alembic script location environment variable
+ENV ALEMBIC_SCRIPT_LOCATION=/app/backend/alembic
+
+# Install system dependencies that might be needed by Python packages
+# Example: psycopg2-binary (for PostgreSQL) might need libpq-dev
+# Add other build dependencies if necessary
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the requirements file into the container at /app
+# Assuming requirements.txt is in the project root, one level up from backend/
+COPY ../requirements.txt /app/requirements.txt
+
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy the backend application code into the container at /app
+# This includes main.py, api/, services/, models.py, etc.
+# The alembic.ini and alembic/ directory are also part of the backend code.
+COPY . /app
+
+# Copy the startup script and make it executable
+COPY backend/start.sh /app/backend/start.sh
+RUN chmod +x /app/backend/start.sh
+
+# Expose port 8000 to the outside world
+EXPOSE 8000
+
+# Debugging Alembic path during build
+RUN echo "Debugging Alembic path during build..." && \
+    alembic --version && \
+    echo "Contents of /app/backend during build:" && \
+    ls /app/backend && \
+    echo "ALEMBIC_CONFIG during build: $ALEMBIC_CONFIG" && \
+    echo "ALEMBIC_SCRIPT_LOCATION during build: $ALEMBIC_SCRIPT_LOCATION"
+
+# Define the command to run your application
+# The --host 0.0.0.0 makes the application accessible from outside the container.
+# Add --reload for development if desired, but typically not for production images.
+# CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Using a script for startup to potentially include migrations or other checks
+# CMD ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"]
+CMD ["/app/backend/start.sh"]

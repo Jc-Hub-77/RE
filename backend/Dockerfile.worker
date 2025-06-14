@@ -1,0 +1,47 @@
+# Use an official Python runtime as a parent image (same as web)
+FROM python:3.10-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Set the Python path to include the backend directory
+ENV PYTHONPATH=/app/backend
+
+# Install system dependencies (same as web, for consistency and if any worker-specific tasks need them)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the requirements file into the container at /app
+# Assuming requirements.txt is in the project root, one level up from backend/
+COPY ../requirements.txt /app/requirements.txt
+
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy the backend application code into the container at /app
+# This ensures celery_app.py, tasks.py, models, services, etc., are available.
+COPY . /app
+
+# Create a non-root user and group
+RUN addgroup --gid 1001 appuser && adduser --uid 1001 --gid 1001 --shell /bin/sh --disabled-password --gecos "" appuser
+
+# Set ownership of the /app directory to the new user
+RUN chown -R appuser:appuser /app
+
+# Switch to the non-root user
+USER appuser
+
+# Define the command to run your Celery worker
+# Ensure 'backend.celery_app.celery_app' correctly points to your Celery application instance
+# The -A option specifies the Celery app instance.
+# The -l info sets the logging level.
+# Using sh -c to allow environment variable substitution for concurrency.
+# exec is used to ensure Celery becomes the main process (PID 1) and handles signals correctly.
+CMD ["sh", "-c", "exec celery -A backend.celery_app worker -l info -P gevent --concurrency ${CELERY_CONCURRENCY:-4}"]
