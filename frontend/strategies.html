@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Strategies - Trading Platform</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/config.js"></script>
+    <!-- Existing styles for strategy cards and modal are largely covered by global .card and .modal,
+         but can be kept if specific overrides are needed.
+         The modal styling in style.css is more comprehensive now. -->
+    <style>
+        /* Minor adjustments if needed, or remove if global styles suffice */
+        .strategy-card { /* This will now primarily use .card styles */
+            margin-bottom: 20px; /* Ensure spacing */
+        }
+        .strategy-card h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        .strategy-card p {
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        .strategy-card .details-btn { /* .btn class will style this */
+            margin-top: 10px;
+        }
+        /* Modal content specific form layout */
+        #strategyCustomizationForm .form-group { /* Use .form-group for consistency */
+            margin-bottom: 15px;
+        }
+        #strategyCustomizationForm .form-group label {
+            display: block; /* Already default for label */
+            margin-bottom: 5px;
+        }
+        #strategyCustomizationForm .form-group input,
+        #strategyCustomizationForm .form-group select {
+            width: 100%; /* Already default */
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>Trading<span style="color: var(--primary-color);">Platform</span></h1>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="dashboard.html">Dashboard</a></li>
+                    <li><a href="exchanges.html">My Exchanges</a></li>
+                    <li><h4>Trading Bots</h4></li>
+                    <li><a href="strategies.html" class="active">Bot Presets / Strategies</a></li>
+                    <li><a href="backtesting.html">Backtesting</a></li>
+                    <li><h4>Account</h4></li>
+                    <li><a href="dashboard.html#profile">Profile Settings</a></li> 
+                    <li><a href="dashboard.html#subscriptions">My Subscriptions</a></li> 
+                    <li><a href="#" id="logoutButtonSidebar">Logout</a></li>
+                </ul>
+                <div class="theme-switch-wrapper">
+                    <label class="theme-switch-label" for="themeSwitch">Dark Mode</label>
+                    <label class="theme-switch">
+                        <input type="checkbox" id="themeSwitch">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </nav>
+        </aside>
+
+        <div class="main-content">
+            <header class="page-header">
+                <h1>Strategy Marketplace</h1>
+                <!-- Could add filters here like in 3Commas example -->
+            </header>
+
+            <section class="content-area" id="strategyListSection">
+                <!-- strategyListContainer will be populated by JS with .card elements -->
+                <div id="strategyListContainer">
+                    <p>Loading strategies...</p>
+                </div>
+            </section>
+
+            <!-- Modal for Strategy Details and Customization -->
+            <div id="strategyDetailsModal" class="modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2 id="modalStrategyName">Strategy Details</h2>
+                        <button type="button" class="close-btn" id="closeModalBtn">&times;</button>
+                    </div>
+                    
+                    <p id="modalStrategyDescription"></p>
+                    <p><strong>Category:</strong> <span id="modalStrategyCategory"></span></p>
+                    <p><strong>Risk Level:</strong> <span id="modalStrategyRisk"></span></p>
+                    
+                    <form id="strategyCustomizationForm" class="mt-2">
+                        <h3>Customize Parameters:</h3>
+                        <div id="modalStrategyParamsContainer" class="form-grid" style="grid-template-columns: 1fr; gap: 10px;">
+                            <!-- Parameter inputs will be generated here as .form-group divs -->
+                        </div>
+                        
+                        <div class="form-group mt-1">
+                            <label for="modalApiKeySelect">Select Exchange Account (API Key):</label>
+                            <select id="modalApiKeySelect" name="apiKeyId" required>
+                                <option value="">Loading API Keys...</option>
+                            </select>
+                        </div>
+                        <p><em>Note: Backtesting with customized parameters will be available on the Backtesting page.</em></p>
+                        <button type="submit" class="btn subscribe-btn mt-1">Subscribe to this Strategy</button>
+                    </form>
+                </div>
+            </div>
+        </div> <!-- .main-content -->
+    </div> <!-- .app-container -->
+
+    <script src="js/auth.js"></script> <!-- For logout in sidebar -->
+    <script src="js/theme.js"></script> <!-- For dark mode toggle -->
+    <script src="js/strategies.js"></script>
+</body>
+</html>

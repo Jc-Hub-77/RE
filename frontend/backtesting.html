@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtest Strategy - Trading Platform</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="js/config.js"></script>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- Embedded styles from original backtesting.html can be reviewed if they conflict or can be merged/removed -->
+    <style>
+        /* .backtest-form-container, .backtest-results-container are now .card */
+        /* .form-grid is globally styled */
+        /* .param-group label, input, select are globally styled */
+
+        #priceChartContainer, #equityChartContainer {
+            width: 100%;
+            height: 400px; 
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color); /* Use CSS var */
+        }
+        /* .metrics-summary and .metric-item are globally styled */
+        #runBacktestBtn { margin-top: 15px; } /* .btn styling applies */
+        
+        /* Table styling is now global */
+        /* #tradesLogTable th, #tradesLogTable td { ... } */
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>Trading<span style="color: var(--primary-color);">Platform</span></h1>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="dashboard.html">Dashboard</a></li>
+                    <li><a href="exchanges.html">My Exchanges</a></li>
+                    <li><h4>Trading Bots</h4></li>
+                    <li><a href="strategies.html">Bot Presets / Strategies</a></li>
+                    <li><a href="backtesting.html" class="active">Backtesting</a></li>
+                    <li><h4>Account</h4></li>
+                    <li><a href="dashboard.html#profile">Profile Settings</a></li> 
+                    <li><a href="dashboard.html#subscriptions">My Subscriptions</a></li> 
+                    <li><a href="#" id="logoutButtonSidebar">Logout</a></li>
+                </ul>
+                <div class="theme-switch-wrapper">
+                    <label class="theme-switch-label" for="themeSwitch">Dark Mode</label>
+                    <label class="theme-switch">
+                        <input type="checkbox" id="themeSwitch">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </nav>
+        </aside>
+
+        <div class="main-content">
+            <header class="page-header">
+                <h1>Backtest Trading Strategy</h1>
+            </header>
+
+            <section class="content-area">
+                <div class="card backtest-form-container"> <!-- Use .card -->
+                    <div class="card-header">
+                        <h2>Setup Backtest</h2>
+                    </div>
+                    <form id="backtestSetupForm">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label for="backtestStrategySelect">Strategy:</label>
+                                <select id="backtestStrategySelect" name="strategyId" required></select>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtestExchangeSelect">Data Source (Exchange):</label>
+                                <select id="backtestExchangeSelect" name="exchangeId" required>
+                                    <option value="binance">Binance</option>
+                                    <option value="kraken">Kraken</option>
+                                    <option value="coinbasepro">Coinbase Pro</option>
+                                    {/* Add more CCXT exchanges as needed */}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtestSymbol">Symbol (e.g., BTC/USDT):</label>
+                                <input type="text" id="backtestSymbol" name="symbol" value="BTC/USDT" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtestTimeframe">Timeframe:</label>
+                                <select id="backtestTimeframe" name="timeframe" required>
+                                    <option value="1m">1 Minute</option>
+                                    <option value="5m">5 Minutes</option>
+                                    <option value="15m">15 Minutes</option>
+                                    <option value="30m">30 Minutes</option>
+                                    <option value="1h" selected>1 Hour</option>
+                                    <option value="4h">4 Hours</option>
+                                    <option value="1d">1 Day</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtestStartDate">Start Date:</label>
+                                <input type="datetime-local" id="backtestStartDate" name="startDate" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtestEndDate">End Date:</label>
+                                <input type="datetime-local" id="backtestEndDate" name="endDate" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtestInitialCapital">Initial Capital (USD):</label>
+                                <input type="number" id="backtestInitialCapital" name="initialCapital" value="10000" step="100" required>
+                            </div>
+                        </div>
+                        
+                        <div id="backtestStrategyParamsContainer" class="mt-2">
+                             <p><em>Select a strategy to see its parameters.</em></p>
+                            <!-- Strategy-specific parameters will be loaded here inside a .form-grid -->
+                        </div>
+                        <button type="submit" id="runBacktestBtn" class="btn mt-2">Run Backtest</button>
+                    </form>
+                </div>
+
+                <div class="card backtest-results-container mt-2" id="backtestResultsSection" style="display:none;">
+                    <div class="card-header">
+                        <h2>Backtest Results</h2>
+                    </div>
+                    <div id="resultsLoading" style="display:none;"><p>Running backtest, please wait...</p></div>
+                    <div id="resultsContent">
+                        <div class="metrics-summary" id="metricsSummaryContainer">
+                            <!-- Metrics will be populated here -->
+                        </div>
+                        <h3 class="mt-2">Price Chart with Trades</h3>
+                        <div id="priceChartContainer"></div>
+                        <h3 class="mt-2">Equity Curve</h3>
+                        <div id="equityChartContainer"></div>
+                        <h3 class="mt-2">Trades Log</h3>
+                        <div style="overflow-x: auto;"> <!-- Add this wrapper -->
+                            <table id="tradesLogTable">
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                    <th>Entry Time</th>
+                                    <th>Entry Price</th>
+                                    <th>Exit Time</th>
+                                    <th>Exit Price</th>
+                                    <th>Size</th>
+                                    <th>TP</th>
+                                    <th>SL</th>
+                                    <th>PnL</th>
+                                    <th>Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tradesLogTableBody"></tbody>
+                        </table>
+                    </div> <!-- Close wrapper -->
+                    </div>
+                </div>
+            </section>
+        </div> <!-- .main-content -->
+    </div> <!-- .app-container -->
+
+    <script src="js/auth.js"></script> <!-- For logout -->
+    <script src="js/theme.js"></script> <!-- For dark mode toggle -->
+    <script src="js/backtesting.js"></script>
+</body>
+</html>

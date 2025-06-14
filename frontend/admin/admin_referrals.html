@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Referral Management - Admin</title>
+    <link rel="stylesheet" href="../css/style.css">
+  <script src="../js/config.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>Admin<span style="color: var(--primary-color);">Panel</span></h1>
+            </div>
+            <nav>
+                <ul>
+                    <li><a href="dashboard.html">Admin Dashboard</a></li>
+                    <li><a href="admin_users.html">User Management</a></li>
+                    <li><a href="admin_strategies.html">Strategy Management</a></li>
+                    <li><a href="admin_subscriptions.html">Subscriptions Overview</a></li>
+                    <li><a href="admin_payments.html">Payment Transactions</a></li>
+                    <li><a href="admin_referrals.html" class="active">Referral Management</a></li>
+                    <li><a href="admin_settings.html">Site Settings</a></li>
+                    <li><a href="../dashboard.html">View Main Site</a></li>
+                    <li><a href="#" id="logoutButtonSidebar">Logout</a></li>
+                </ul>
+                <div class="theme-switch-wrapper">
+                    <label class="theme-switch-label" for="themeSwitch">Dark Mode</label>
+                    <label class="theme-switch">
+                        <input type="checkbox" id="themeSwitch">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </nav>
+        </aside>
+
+        <div class="main-content">
+            <header class="page-header">
+                <h1>Referral Program Management</h1>
+            </header>
+
+            <section class="content-area">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Referral Records & Commissions</h2>
+                        <!-- Add search/filter controls: by referrer, by referred, by status (e.g., pending payout) -->
+                    </div>
+                    <table id="referralsTable">
+                        <thead>
+                            <tr>
+                                <th>Ref ID</th>
+                                <th>Referrer (ID/User)</th>
+                                <th>Referred (ID/User)</th>
+                                <th>Signed Up</th>
+                                <th>First Payment At</th>
+                                <th>Commission Earned</th>
+                                <th>Pending Payout</th>
+                                <th>Total Paid Out</th>
+                                <th>Last Payout</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="referralsTableBody">
+                            <tr><td colspan="10" style="text-align:center;">Loading referral data...</td></tr>
+                        </tbody>
+                    </table>
+                    <!-- Add pagination controls here -->
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="../js/auth.js"></script>
+    <script src="../js/theme.js"></script>
+    <script src="js/admin_referrals.js"></script> 
+</body>
+</html>
